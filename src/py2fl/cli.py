@@ -16,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser = subparsers.add_parser("generate", help="Generate a MIDI arrangement from text, melody, or both.")
     generate_parser.add_argument("--text", help="Text prompt or lyrics.")
     generate_parser.add_argument("--melody-midi", type=Path, help="Path to a melody MIDI file.")
+    generate_parser.add_argument("--progression", help="Chord progression, for example 1-5-6-4 or Am-F-C-G.")
     generate_parser.add_argument("--tempo", type=int, help="Tempo override in BPM.")
     generate_parser.add_argument("--key", help="Key override, for example C, F#, or A.")
     generate_parser.add_argument("--genre", help="Genre hint, for example trap or rnb.")
@@ -36,11 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "generate":
-        if not args.text and not args.melody_midi:
-            parser.error("generate requires --text, --melody-midi, or both")
+        if not args.text and not args.melody_midi and not args.progression:
+            parser.error("generate requires --text, --melody-midi, --progression, or a valid combination")
         request = GenerationRequest(
             text=args.text,
             melody_midi_path=args.melody_midi,
+            chord_progression=args.progression,
             tempo=args.tempo,
             key=args.key,
             genre=args.genre,

@@ -1,6 +1,6 @@
 # py2fl
 
-`py2fl` is a local Python tool for generating FL Studio-friendly MIDI arrangements from text prompts, melody MIDI, or both.
+`py2fl` is a local Python tool for generating FL Studio-friendly MIDI arrangements from text prompts, melody MIDI, chord progressions, or combinations of those inputs.
 
 It focuses on a practical file-based workflow:
 
@@ -17,6 +17,7 @@ For Korean documentation, see [READMEKR.md](READMEKR.md).
 - Text-only generation
 - Melody-only generation from an input MIDI file
 - Hybrid generation from text + melody MIDI
+- Chord-to-melody generation from degree or named chord progressions
 - Candidate batch generation with multiple options
 - Browser preview for full arrangements and per-bar timeline slices
 - Per-part mute controls in the web UI
@@ -81,6 +82,7 @@ Options:
 
 - `--text`: text prompt or lyrics
 - `--melody-midi`: input melody MIDI path
+- `--progression`: chord progression such as `1-5-6-4` or `Am-F-C-G`
 - `--tempo`: tempo override in BPM
 - `--key`: key override such as `C`, `F#`, `A minor`
 - `--genre`: genre hint such as `trap`, `rnb`, `house`
@@ -91,7 +93,7 @@ Options:
 
 Notes:
 
-- At least one of `--text` or `--melody-midi` is required.
+- At least one of `--text`, `--melody-midi`, or `--progression` is required.
 - `--count 1` returns a single candidate.
 - `--count > 1` creates a batch directory with multiple candidate folders.
 
@@ -102,6 +104,7 @@ py2fl generate --text "dark trap anthem" --bars 8 --seed 7 --out ./exports
 py2fl generate --melody-midi ./idea.mid --tempo 100 --out ./exports
 py2fl generate --text "dreamy rnb night drive" --melody-midi ./topline.mid --seed 3 --out ./exports
 py2fl generate --text "dreamy rnb night drive" --count 4 --out ./exports
+py2fl generate --progression "1-5-6-4" --text "dreamy rnb topline" --count 4 --out ./exports
 ```
 
 ### Serve the web UI
@@ -149,6 +152,7 @@ The local web UI supports:
 - `Reroll All`
 - `Reroll Chords`
 - `Reroll Harmony` for a single timeline bar
+- A dedicated `/melody-from-chords` page for writing toplines from chord progressions
 - saving the selected candidate into `batch_meta.json`
 
 ### Harmony Timeline
@@ -173,6 +177,26 @@ Behavior:
 - melody and drums stay unchanged for bar-level reroll
 - the most recently rerolled bar is highlighted with a darker card and a `Recently Updated` label
 - bar reroll now updates the relevant UI fragments without a full page reload
+
+
+### Melody from Chords
+
+Open `/melody-from-chords` in the local web UI to use the chord-to-melody flow.
+
+This page supports:
+
+- degree input such as `1-5-6-4`
+- named chords such as `Am-F-C-G`
+- optional style text such as `dreamy rnb topline`
+- 1 to 8 melody candidates
+- `Reroll All`, `Reroll Melody`, and per-bar `Reroll Melody`
+- full-arrangement preview and per-bar preview
+
+Behavior:
+
+- user-entered chord progression stays fixed
+- melody candidates change across seeds and rerolls
+- bar reroll updates `melody.mid` and `full_arrangement.mid` while preserving the harmonic path
 
 ## Generation Rules
 

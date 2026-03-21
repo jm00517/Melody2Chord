@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
@@ -6,11 +6,12 @@ import json
 import random
 import re
 
-from .arrangement import build_arrangement
+from .arrangement import build_arrangement, build_arrangement_from_progression
 from .melody import analyze_melody_file
 from .midi import parse_midi_notes, write_meta, write_midi
 from .models import Arrangement, BAR_TICKS, GenerationRequest, GenerationResult, NoteEvent, TrackData
 from .music_theory import PITCH_CLASS_NAMES, key_label
+from .progression import ParsedProgression, parse_progression, progression_display
 from .text_analysis import analyze_text
 
 BATCH_META_FILENAME = "batch_meta.json"
@@ -18,20 +19,14 @@ BATCH_META_FILENAME = "batch_meta.json"
 
 def generate_song(request: GenerationRequest) -> GenerationResult:
     context = _prepare_context(request)
-    arrangement = build_arrangement(
-        text_features=context["text_features"],
-        melody_analysis=context["melody_analysis"],
-        tempo=request.tempo,
-        key=request.key,
-        bars=request.bars,
-        seed=request.seed,
-    )
-    run_dir = _build_output_dir(request.output_dir, request.text, request.melody_midi_path)
+    arrangement, parsed_progression = _build_for_request(request, context)
+    run_dir = _build_output_dir(request.output_dir, request.text, request.melody_midi_path, request.chord_progression)
     return _write_arrangement(
         run_dir,
         arrangement,
         request,
         melody_analysis=context["melody_analysis"],
+        parsed_progression=parsed_progression,
         candidate_index=1,
         candidate_seed=request.seed,
         reroll_scope="all",
@@ -41,11 +36,12 @@ def generate_song(request: GenerationRequest) -> GenerationResult:
 def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope: str = "all", seed_offset: int = 0) -> list[GenerationResult]:
     if count < 1:
         raise ValueError("count must be at least 1")
-    if reroll_scope not in {"all", "chords"}:
-        raise ValueError("reroll_scope must be 'all' or 'chords'")
+    allowed_scopes = {"all", "chords", "melody"}
+    if reroll_scope not in allowed_scopes:
+        raise ValueError("reroll_scope must be 'all', 'chords', or 'melody'")
 
     context = _prepare_context(request)
-    batch_dir = _build_output_dir(request.output_dir, request.text, request.melody_midi_path)
+    batch_dir = _build_output_dir(request.output_dir, request.text, request.melody_midi_path, request.chord_progression)
     batch_dir.mkdir(parents=True, exist_ok=True)
 
     if request.seed is not None:
@@ -54,33 +50,44 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
         base_seed = random.SystemRandom().randrange(1, 1_000_000_000) + seed_offset
 
     base_arrangement = None
-    if reroll_scope == "chords":
-        base_arrangement = build_arrangement(
-            text_features=context["text_features"],
-            melody_analysis=context["melody_analysis"],
-            tempo=request.tempo,
-            key=request.key,
-            bars=request.bars,
-            seed=base_seed,
+    parsed_progression = context["parsed_progression"]
+    if reroll_scope in {"chords", "melody"}:
+        base_arrangement, _ = _build_for_request(
+            GenerationRequest(
+                text=request.text,
+                melody_midi_path=request.melody_midi_path,
+                chord_progression=request.chord_progression,
+                tempo=request.tempo,
+                key=request.key,
+                genre=request.genre,
+                bars=request.bars,
+                seed=base_seed,
+                output_dir=request.output_dir,
+            ),
+            context,
         )
 
     results: list[GenerationResult] = []
-    seen_signatures: set[tuple[tuple[int, ...], str]] = set()
+    seen_signatures: set[tuple[tuple[object, ...], str]] = set()
     for index in range(count):
-        candidate_seed = base_seed + index * 101 + (5000 if reroll_scope == "chords" else 0)
+        candidate_seed = base_seed + index * 101 + (5000 if reroll_scope != "all" else 0)
         arrangement = None
         final_seed = candidate_seed
         for attempt in range(12):
             attempt_seed = candidate_seed + attempt * 997
-            candidate_arrangement = build_arrangement(
-                text_features=context["text_features"],
-                melody_analysis=context["melody_analysis"],
+            candidate_request = GenerationRequest(
+                text=request.text,
+                melody_midi_path=request.melody_midi_path,
+                chord_progression=request.chord_progression,
                 tempo=request.tempo,
                 key=request.key,
+                genre=request.genre,
                 bars=request.bars,
                 seed=attempt_seed,
+                output_dir=request.output_dir,
             )
-            signature = (tuple(candidate_arrangement.progression_degrees), candidate_arrangement.progression_label)
+            candidate_arrangement, parsed_progression = _build_for_request(candidate_request, context)
+            signature = _candidate_signature(candidate_arrangement, context["parsed_progression"])
             if signature not in seen_signatures or attempt == 11:
                 arrangement = candidate_arrangement
                 final_seed = attempt_seed
@@ -89,27 +96,45 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
         if arrangement is None:
             raise RuntimeError("Failed to build candidate arrangement")
         if base_arrangement is not None:
-            arrangement = Arrangement(
-                melody=base_arrangement.melody,
-                chords=arrangement.chords,
-                bass=arrangement.bass,
-                drums=base_arrangement.drums,
-                tempo_bpm=base_arrangement.tempo_bpm,
-                key=arrangement.key,
-                mode=arrangement.mode,
-                bars=base_arrangement.bars,
-                style_tags=base_arrangement.style_tags,
-                progression_label=arrangement.progression_label,
-                progression_degrees=arrangement.progression_degrees,
-                drum_pattern=base_arrangement.drum_pattern,
-                bass_pattern=arrangement.bass_pattern,
-            )
+            if reroll_scope == "chords":
+                arrangement = Arrangement(
+                    melody=base_arrangement.melody,
+                    chords=arrangement.chords,
+                    bass=arrangement.bass,
+                    drums=base_arrangement.drums,
+                    tempo_bpm=base_arrangement.tempo_bpm,
+                    key=arrangement.key,
+                    mode=arrangement.mode,
+                    bars=base_arrangement.bars,
+                    style_tags=base_arrangement.style_tags,
+                    progression_label=arrangement.progression_label,
+                    progression_degrees=arrangement.progression_degrees,
+                    drum_pattern=base_arrangement.drum_pattern,
+                    bass_pattern=arrangement.bass_pattern,
+                )
+            elif reroll_scope == "melody":
+                arrangement = Arrangement(
+                    melody=arrangement.melody,
+                    chords=base_arrangement.chords,
+                    bass=base_arrangement.bass,
+                    drums=base_arrangement.drums,
+                    tempo_bpm=base_arrangement.tempo_bpm,
+                    key=base_arrangement.key,
+                    mode=base_arrangement.mode,
+                    bars=base_arrangement.bars,
+                    style_tags=base_arrangement.style_tags,
+                    progression_label=base_arrangement.progression_label,
+                    progression_degrees=base_arrangement.progression_degrees,
+                    drum_pattern=base_arrangement.drum_pattern,
+                    bass_pattern=base_arrangement.bass_pattern,
+                )
         candidate_dir = batch_dir / f"option_{index + 1:02d}"
         result = _write_arrangement(
             candidate_dir,
             arrangement,
             request,
             melody_analysis=context["melody_analysis"],
+            parsed_progression=context["parsed_progression"],
             candidate_index=index + 1,
             candidate_seed=final_seed,
             reroll_scope=reroll_scope,
@@ -135,14 +160,15 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
         "text": request.text,
         "genre": request.genre,
         "source_melody": str(request.melody_midi_path) if request.melody_midi_path else None,
+        "source_progression": request.chord_progression,
         "tempo": request.tempo,
         "key": request.key,
-        "genre": request.genre,
         "bars": request.bars,
         "seed": request.seed,
         "candidate_count": len(results),
         "selected_option": selected_option,
         "selected_output_dir": None if selected_candidate is None else str(selected_candidate.output_dir),
+        "generator_mode": results[0].metadata.get("ui_mode") if results else "arrangement",
         "candidates": [
             {
                 "candidate_index": result.metadata.get("candidate_index"),
@@ -193,74 +219,10 @@ def reroll_candidate_bar(batch_dir: Path, candidate_index: int, bar_index: int, 
     if bar_index < 1 or bar_index > bars:
         raise ValueError("bar_index is out of range")
 
-    request = GenerationRequest(
-        text=_optional_string(batch_meta.get("text")),
-        melody_midi_path=Path(str(batch_meta.get("source_melody"))) if batch_meta.get("source_melody") else None,
-        tempo=_optional_int_value(batch_meta.get("tempo")) or _optional_int_value(metadata.get("tempo")),
-        key=_key_name_from_label(_optional_string(metadata.get("key"))),
-        genre=_optional_string(batch_meta.get("genre")),
-        bars=bars,
-        seed=_optional_int_value(metadata.get("candidate_seed")),
-        output_dir=batch_dir,
-    )
-    context = _prepare_context(request)
-    current = _read_existing_arrangement(output_dir, metadata)
-
-    base_seed = int(metadata.get("candidate_seed") or 0) + reroll_nonce + bar_index * 1009
-    start_tick = (bar_index - 1) * BAR_TICKS
-    end_tick = start_tick + BAR_TICKS
-    replacement = None
-    for attempt in range(10):
-        candidate_arrangement = build_arrangement(
-            text_features=context["text_features"],
-            melody_analysis=context["melody_analysis"],
-            tempo=request.tempo,
-            key=request.key,
-            bars=request.bars,
-            seed=base_seed + attempt * 313,
-        )
-        new_chords = _notes_for_span(candidate_arrangement.chords, start_tick, end_tick)
-        old_chords = _notes_for_span(current.chords, start_tick, end_tick)
-        new_bass = _notes_for_span(candidate_arrangement.bass, start_tick, end_tick)
-        old_bass = _notes_for_span(current.bass, start_tick, end_tick)
-        if _note_signature(new_chords) != _note_signature(old_chords) or _note_signature(new_bass) != _note_signature(old_bass) or attempt == 9:
-            replacement = candidate_arrangement
-            break
-    if replacement is None:
-        raise RuntimeError("Failed to reroll bar")
-
-    updated = Arrangement(
-        melody=current.melody,
-        chords=_replace_bar_notes(current.chords, replacement.chords, start_tick, end_tick),
-        bass=_replace_bar_notes(current.bass, replacement.bass, start_tick, end_tick),
-        drums=current.drums,
-        tempo_bpm=current.tempo_bpm,
-        key=current.key,
-        mode=current.mode,
-        bars=current.bars,
-        style_tags=current.style_tags,
-        progression_label=str(metadata.get("progression_label") or current.progression_label),
-        progression_degrees=_replace_progression_degree(list(metadata.get("progression_degrees") or current.progression_degrees), replacement.progression_degrees, bar_index),
-        drum_pattern=current.drum_pattern,
-        bass_pattern=str(metadata.get("bass_pattern") or current.bass_pattern),
-    )
-    result = _write_arrangement(
-        output_dir,
-        updated,
-        request,
-        melody_analysis=context["melody_analysis"],
-        candidate_index=int(metadata.get("candidate_index") or candidate_index),
-        candidate_seed=base_seed,
-        reroll_scope="bar_harmony",
-    )
-    result.metadata["recently_updated_bar"] = bar_index
-    for bar in result.metadata.get("bar_summary", []):
-        bar["recently_updated"] = int(bar.get("bar_index") or 0) == bar_index
-    write_meta(output_dir / "meta.json", result.metadata)
-    result.metadata["batch_dir"] = str(batch_dir)
-    result.metadata["option_name"] = selected.get("option_name") or output_dir.name
-    _refresh_batch_candidate(batch_meta, result)
-    write_meta(batch_dir / BATCH_META_FILENAME, batch_meta)
+    if metadata.get("input_mode") in {"chords", "text+chords"}:
+        batch_meta = _reroll_melody_bar(batch_dir, selected, metadata, bar_index, reroll_nonce)
+    else:
+        batch_meta = _reroll_harmony_bar(batch_dir, selected, metadata, bar_index, reroll_nonce)
     return batch_meta
 
 
@@ -282,12 +244,44 @@ def select_candidate(batch_dir: Path, candidate_index: int) -> dict[str, object]
 
 
 def _prepare_context(request: GenerationRequest) -> dict[str, object]:
-    if not request.text and not request.melody_midi_path:
-        raise ValueError("At least one input is required: text or melody_midi_path")
+    if not request.text and not request.melody_midi_path and not request.chord_progression:
+        raise ValueError("At least one input is required: text, melody_midi_path, or chord_progression")
+    text_features = analyze_text(request.text, request.genre)
+    parsed_progression = None
+    if request.chord_progression:
+        parsed_progression = parse_progression(
+            request.chord_progression,
+            key_hint=request.key,
+            bars=request.bars,
+            genre_hint=request.genre,
+            style_text=request.text,
+        )
     return {
-        "text_features": analyze_text(request.text, request.genre),
+        "text_features": text_features,
         "melody_analysis": analyze_melody_file(request.melody_midi_path) if request.melody_midi_path else None,
+        "parsed_progression": parsed_progression,
     }
+
+
+def _build_for_request(request: GenerationRequest, context: dict[str, object]) -> tuple[Arrangement, ParsedProgression | None]:
+    parsed_progression = context["parsed_progression"]
+    if parsed_progression is not None:
+        arrangement = build_arrangement_from_progression(
+            progression=parsed_progression,
+            text_features=context["text_features"],
+            tempo=request.tempo,
+            seed=request.seed,
+        )
+        return arrangement, parsed_progression
+    arrangement = build_arrangement(
+        text_features=context["text_features"],
+        melody_analysis=context["melody_analysis"],
+        tempo=request.tempo,
+        key=request.key,
+        bars=request.bars,
+        seed=request.seed,
+    )
+    return arrangement, None
 
 
 def _write_arrangement(
@@ -296,13 +290,14 @@ def _write_arrangement(
     request: GenerationRequest,
     *,
     melody_analysis,
+    parsed_progression: ParsedProgression | None,
     candidate_index: int | None,
     candidate_seed: int | None,
     reroll_scope: str,
 ) -> GenerationResult:
     run_dir.mkdir(parents=True, exist_ok=True)
     bar_summary = _build_bar_summary(arrangement)
-    full_progression_text = " -> ".join(bar["chord_name"] for bar in bar_summary) if bar_summary else arrangement.progression_label
+    full_progression_text = progression_display(parsed_progression.chord_bars) if parsed_progression else (" -> ".join(bar["chord_name"] for bar in bar_summary) if bar_summary else arrangement.progression_label)
 
     track_map = {
         "melody.mid": TrackData(name="Melody", notes=arrangement.melody, channel=0),
@@ -321,13 +316,17 @@ def _write_arrangement(
     write_midi(full_arrangement, list(track_map.values()), arrangement.tempo_bpm)
     files.append(full_arrangement)
 
+    mode = _input_mode(request)
     metadata = {
-        "input_mode": _input_mode(request),
+        "input_mode": mode,
+        "ui_mode": "melody_from_chords" if parsed_progression else "arrangement",
         "tempo": arrangement.tempo_bpm,
         "key": key_label(arrangement.key, arrangement.mode),
         "bars": arrangement.bars,
         "style_tags": arrangement.style_tags,
         "source_melody": str(request.melody_midi_path) if request.melody_midi_path else None,
+        "source_progression": request.chord_progression,
+        "progression_notation": None if parsed_progression is None else parsed_progression.notation,
         "source_start_offset_ticks": None if melody_analysis is None else melody_analysis.source_start_offset_ticks,
         "melody_aligned_to_start": melody_analysis is not None,
         "text": request.text,
@@ -344,6 +343,9 @@ def _write_arrangement(
         "candidate_seed": candidate_seed,
         "reroll_scope": reroll_scope,
         "preview_file": "full_arrangement.mid",
+        "timeline_title": "Melody Timeline" if parsed_progression else "Harmony Timeline",
+        "timeline_description": "Each bar shows the fixed chord, melody focus notes, and how strongly the topline lands inside the chord tones." if parsed_progression else "Each bar shows the chosen chord, representative melody tones, and how much of the melody sits inside the chord tones.",
+        "bar_action_label": "Reroll Melody" if parsed_progression else "Reroll Harmony",
     }
     meta_path = run_dir / "meta.json"
     write_meta(meta_path, metadata)
@@ -351,13 +353,15 @@ def _write_arrangement(
     return GenerationResult(output_dir=run_dir, files=files, metadata=metadata)
 
 
-def _build_output_dir(base_dir: Path, text: str | None, melody_path: Path | None) -> Path:
+def _build_output_dir(base_dir: Path, text: str | None, melody_path: Path | None, chord_progression: str | None) -> Path:
     base_dir = Path(base_dir)
     base_name = None
     if text:
         base_name = _slugify(text[:40])
     elif melody_path:
         base_name = _slugify(melody_path.stem)
+    elif chord_progression:
+        base_name = _slugify(chord_progression[:40])
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return base_dir / f"{timestamp}_{base_name or 'arrangement'}"
 
@@ -368,12 +372,22 @@ def _slugify(text: str) -> str:
 
 
 def _input_mode(request: GenerationRequest) -> str:
+    if request.chord_progression and request.text:
+        return "text+chords"
+    if request.chord_progression:
+        return "chords"
     if request.text and request.melody_midi_path:
         return "text+melody"
     if request.melody_midi_path:
         return "melody"
     return "text"
 
+
+def _candidate_signature(arrangement: Arrangement, parsed_progression: ParsedProgression | None) -> tuple[tuple[object, ...], str]:
+    if parsed_progression is not None:
+        melody_signature = tuple((note.pitch, note.start, note.duration) for note in arrangement.melody[:16])
+        return melody_signature, arrangement.progression_label
+    return tuple(arrangement.progression_degrees), arrangement.progression_label
 
 
 def _build_bar_summary(arrangement: Arrangement) -> list[dict[str, object]]:
@@ -518,15 +532,161 @@ def _key_name_from_label(label: str | None) -> str | None:
     return _split_key_label(label)[0]
 
 
+def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: dict[str, object], bar_index: int, reroll_nonce: int) -> dict[str, object]:
+    request = GenerationRequest(
+        text=_optional_string(load_batch_meta(batch_dir).get("text")),
+        melody_midi_path=Path(str(load_batch_meta(batch_dir).get("source_melody"))) if load_batch_meta(batch_dir).get("source_melody") else None,
+        tempo=_optional_int_value(load_batch_meta(batch_dir).get("tempo")) or _optional_int_value(metadata.get("tempo")),
+        key=_key_name_from_label(_optional_string(metadata.get("key"))),
+        genre=_optional_string(load_batch_meta(batch_dir).get("genre")),
+        bars=int(metadata.get("bars") or 4),
+        seed=_optional_int_value(metadata.get("candidate_seed")),
+        output_dir=batch_dir,
+    )
+    context = _prepare_context(request)
+    current = _read_existing_arrangement(Path(str(selected.get("output_dir"))), metadata)
+    base_seed = int(metadata.get("candidate_seed") or 0) + reroll_nonce + bar_index * 1009
+    start_tick = (bar_index - 1) * BAR_TICKS
+    end_tick = start_tick + BAR_TICKS
+    replacement = None
+    for attempt in range(10):
+        candidate_request = GenerationRequest(
+            text=request.text,
+            melody_midi_path=request.melody_midi_path,
+            chord_progression=request.chord_progression,
+            tempo=request.tempo,
+            key=request.key,
+            genre=request.genre,
+            bars=request.bars,
+            seed=base_seed + attempt * 313,
+            output_dir=request.output_dir,
+        )
+        candidate_arrangement, _ = _build_for_request(candidate_request, context)
+        new_chords = _notes_for_span(candidate_arrangement.chords, start_tick, end_tick)
+        old_chords = _notes_for_span(current.chords, start_tick, end_tick)
+        new_bass = _notes_for_span(candidate_arrangement.bass, start_tick, end_tick)
+        old_bass = _notes_for_span(current.bass, start_tick, end_tick)
+        if _note_signature(new_chords) != _note_signature(old_chords) or _note_signature(new_bass) != _note_signature(old_bass) or attempt == 9:
+            replacement = candidate_arrangement
+            break
+    if replacement is None:
+        raise RuntimeError("Failed to reroll bar")
+    updated = Arrangement(
+        melody=current.melody,
+        chords=_replace_bar_notes(current.chords, replacement.chords, start_tick, end_tick),
+        bass=_replace_bar_notes(current.bass, replacement.bass, start_tick, end_tick),
+        drums=current.drums,
+        tempo_bpm=current.tempo_bpm,
+        key=current.key,
+        mode=current.mode,
+        bars=current.bars,
+        style_tags=current.style_tags,
+        progression_label=str(metadata.get("progression_label") or current.progression_label),
+        progression_degrees=_replace_progression_degree(list(metadata.get("progression_degrees") or current.progression_degrees), replacement.progression_degrees, bar_index),
+        drum_pattern=current.drum_pattern,
+        bass_pattern=str(metadata.get("bass_pattern") or current.bass_pattern),
+    )
+    result = _write_arrangement(
+        Path(str(selected.get("output_dir"))),
+        updated,
+        request,
+        melody_analysis=context["melody_analysis"],
+        parsed_progression=None,
+        candidate_index=int(metadata.get("candidate_index") or selected.get("candidate_index") or 1),
+        candidate_seed=base_seed,
+        reroll_scope="bar_harmony",
+    )
+    return _finalize_bar_reroll(batch_dir, selected, result, bar_index)
+
+
+def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: dict[str, object], bar_index: int, reroll_nonce: int) -> dict[str, object]:
+    batch_meta = load_batch_meta(batch_dir)
+    request = GenerationRequest(
+        text=_optional_string(batch_meta.get("text")),
+        chord_progression=_optional_string(batch_meta.get("source_progression")),
+        tempo=_optional_int_value(batch_meta.get("tempo")) or _optional_int_value(metadata.get("tempo")),
+        key=_key_name_from_label(_optional_string(metadata.get("key"))),
+        genre=_optional_string(batch_meta.get("genre")),
+        bars=int(metadata.get("bars") or 4),
+        seed=_optional_int_value(metadata.get("candidate_seed")),
+        output_dir=batch_dir,
+    )
+    context = _prepare_context(request)
+    current = _read_existing_arrangement(Path(str(selected.get("output_dir"))), metadata)
+    base_seed = int(metadata.get("candidate_seed") or 0) + reroll_nonce + bar_index * 1009
+    start_tick = (bar_index - 1) * BAR_TICKS
+    end_tick = start_tick + BAR_TICKS
+    replacement = None
+    for attempt in range(10):
+        candidate_request = GenerationRequest(
+            text=request.text,
+            melody_midi_path=request.melody_midi_path,
+            chord_progression=request.chord_progression,
+            tempo=request.tempo,
+            key=request.key,
+            genre=request.genre,
+            bars=request.bars,
+            seed=base_seed + attempt * 313,
+            output_dir=request.output_dir,
+        )
+        candidate_arrangement, parsed_progression = _build_for_request(candidate_request, context)
+        new_melody = _notes_for_span(candidate_arrangement.melody, start_tick, end_tick)
+        old_melody = _notes_for_span(current.melody, start_tick, end_tick)
+        if _note_signature(new_melody) != _note_signature(old_melody) or attempt == 9:
+            replacement = candidate_arrangement
+            break
+    if replacement is None:
+        raise RuntimeError("Failed to reroll melody bar")
+    updated = Arrangement(
+        melody=_replace_bar_notes(current.melody, replacement.melody, start_tick, end_tick),
+        chords=current.chords,
+        bass=current.bass,
+        drums=current.drums,
+        tempo_bpm=current.tempo_bpm,
+        key=current.key,
+        mode=current.mode,
+        bars=current.bars,
+        style_tags=current.style_tags,
+        progression_label=str(metadata.get("progression_label") or current.progression_label),
+        progression_degrees=list(metadata.get("progression_degrees") or current.progression_degrees),
+        drum_pattern=current.drum_pattern,
+        bass_pattern=current.bass_pattern,
+    )
+    result = _write_arrangement(
+        Path(str(selected.get("output_dir"))),
+        updated,
+        request,
+        melody_analysis=None,
+        parsed_progression=context["parsed_progression"],
+        candidate_index=int(metadata.get("candidate_index") or selected.get("candidate_index") or 1),
+        candidate_seed=base_seed,
+        reroll_scope="bar_melody",
+    )
+    return _finalize_bar_reroll(batch_dir, selected, result, bar_index)
+
+
+def _finalize_bar_reroll(batch_dir: Path, selected: dict[str, object], result: GenerationResult, bar_index: int) -> dict[str, object]:
+    result.metadata["recently_updated_bar"] = bar_index
+    for bar in result.metadata.get("bar_summary", []):
+        bar["recently_updated"] = int(bar.get("bar_index") or 0) == bar_index
+    write_meta(Path(result.output_dir) / "meta.json", result.metadata)
+    result.metadata["batch_dir"] = str(batch_dir)
+    result.metadata["option_name"] = selected.get("option_name") or Path(result.output_dir).name
+    batch_meta = load_batch_meta(batch_dir)
+    _refresh_batch_candidate(batch_meta, result)
+    write_meta(batch_dir / BATCH_META_FILENAME, batch_meta)
+    return batch_meta
+
+
 def _replace_bar_notes(current_notes: list[NoteEvent], replacement_notes: list[NoteEvent], start_tick: int, end_tick: int) -> list[NoteEvent]:
     kept = [note for note in current_notes if note.end <= start_tick or note.start >= end_tick]
     inserted = [note for note in replacement_notes if note.start < end_tick and note.end > start_tick]
     return sorted(kept + inserted, key=lambda note: (note.start, note.pitch))
 
 
-def _replace_progression_degree(current: list[int], replacement: list[int], bar_index: int) -> list[int]:
+def _replace_progression_degree(current: list[object], replacement: list[object], bar_index: int) -> list[object]:
     if len(current) < bar_index:
-        current.extend([0] * (bar_index - len(current)))
+        current.extend([None] * (bar_index - len(current)))
     if replacement and len(replacement) >= bar_index:
         current[bar_index - 1] = replacement[bar_index - 1]
     return current

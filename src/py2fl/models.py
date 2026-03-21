@@ -70,6 +70,7 @@ class Arrangement:
 class GenerationRequest:
     text: str | None = None
     melody_midi_path: Path | None = None
+    chord_progression: str | None = None
     tempo: int | None = None
     key: str | None = None
     genre: str | None = None

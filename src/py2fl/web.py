@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import cgi
 import html
@@ -28,6 +28,9 @@ class Py2FLWebApp:
         if method == "GET" and path == "/":
             return self._respond_html(start_response, "200 OK", self._render_page())
 
+        if method == "GET" and path == "/melody-from-chords":
+            return self._respond_html(start_response, "200 OK", self._render_chords_page())
+
         if method == "GET" and path == "/files":
             return self._serve_file(environ, start_response)
 
@@ -37,6 +40,13 @@ class Py2FLWebApp:
                 return self._respond_html(start_response, "200 OK", body)
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "POST" and path == "/generate-chords":
+            try:
+                body = self._handle_generate_chords(environ)
+                return self._respond_html(start_response, "200 OK", body)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_chords_page(error=str(exc)))
 
         if method == "POST" and path == "/select":
             try:
@@ -89,6 +99,38 @@ class Py2FLWebApp:
         batch_meta = load_batch_meta(batch_dir) if batch_dir else None
         return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_request(request, count))
 
+    def _handle_generate_chords(self, environ: dict) -> str:
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        progression = _optional_text(form.getfirst("chord_progression"))
+        text_value = _optional_text(form.getfirst("text"))
+        tempo = _optional_int(form.getfirst("tempo"))
+        key = _optional_text(form.getfirst("key"))
+        genre = _optional_text(form.getfirst("genre"))
+        bars = _optional_int(form.getfirst("bars"))
+        seed = _optional_int(form.getfirst("seed"))
+        count = _optional_int(form.getfirst("count")) or 4
+        count = max(1, min(count, 8))
+        reroll_scope = _optional_text(form.getfirst("reroll_scope")) or "all"
+        seed_offset = _optional_int(form.getfirst("seed_offset")) or 0
+
+        if not progression:
+            raise ValueError("Enter a chord progression like 1-5-6-4 or Am-F-C-G.")
+
+        request = GenerationRequest(
+            text=text_value,
+            chord_progression=progression,
+            tempo=tempo,
+            key=key,
+            genre=genre,
+            bars=bars,
+            seed=seed,
+            output_dir=self.output_dir,
+        )
+        candidates = generate_candidates(request, count=count, reroll_scope=reroll_scope, seed_offset=seed_offset)
+        batch_dir = candidates[0].output_dir.parent if candidates else None
+        batch_meta = load_batch_meta(batch_dir) if batch_dir else None
+        return self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_chords_request(request, count))
+
     def _handle_select(self, environ: dict) -> str:
         form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
         batch_dir_value = _optional_text(form.getfirst("batch_dir"))
@@ -109,6 +151,8 @@ class Py2FLWebApp:
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
         }
+        if _is_chords_batch(batch_meta):
+            return self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_batch_chords(batch_meta, len(candidates)))
         return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
 
 
@@ -137,6 +181,8 @@ class Py2FLWebApp:
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
         }
+        if _is_chords_batch(batch_meta):
+            return self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_batch_chords(batch_meta, len(candidates)))
         return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
 
 
@@ -155,7 +201,7 @@ class Py2FLWebApp:
         active_index = _active_candidate_index(candidates, batch_meta)
         tab_html = _candidate_tab(result, active_index)
         progress_html = _candidate_progress_header(result, batch_meta)
-        bar_html = _bar_card(bar_data, Path(result.output_dir).parent, candidate_index, preview_url, tempo)
+        bar_html = _bar_card(bar_data, Path(result.output_dir).parent, candidate_index, preview_url, tempo, str(meta.get("bar_action_label", "Reroll Harmony")))
         return f"""<div data-fragment-root="reroll-bar">
   <div data-fragment="candidate-tab">{tab_html}</div>
   <div data-fragment="candidate-progress">{progress_html}</div>
@@ -382,6 +428,7 @@ class Py2FLWebApp:
         </div>
         <div class="specs">
           <div class="spec"><strong>Candidate overview</strong>Use the top comparison bar to scan every option's progression before opening one in detail.</div>
+          <div class="spec"><strong>Chord-to-melody mode</strong>Open <a href="/melody-from-chords">/melody-from-chords</a> to generate toplines from a fixed chord progression.</div>
           <div class="spec"><strong>Harmony timeline</strong>Each detailed view shows bar-by-bar chords, representative melody pitches, and a simple match percentage.</div>
           <div class="spec"><strong>Browser playback</strong>Each candidate previews its `full_arrangement.mid` file directly in the browser with a lightweight synth setup.</div>
           <div class="spec"><strong>Saved selection</strong>`Select This` stores the chosen option in <code>{BATCH_META_FILENAME}</code> inside the batch folder.</div>
@@ -660,6 +707,320 @@ class Py2FLWebApp:
 </html>
 """
 
+    def _render_chords_page(
+        self,
+        candidates: list | None = None,
+        batch_meta: dict[str, object] | None = None,
+        form_state: dict[str, str] | None = None,
+        error: str | None = None,
+    ) -> str:
+        state = form_state or {}
+        error_html = ""
+        if error:
+            error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
+
+        reroll_controls = ""
+        comparison_bar = ""
+        candidate_details = ""
+        active_index = _active_candidate_index(candidates or [], batch_meta)
+        if candidates:
+            reroll_controls = f"""
+            <div class="actions">
+              <form method="post" action="/generate-chords">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="all"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit">Reroll All</button></form>
+              <form method="post" action="/generate-chords">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="melody"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit" class="secondary">Reroll Melody</button></form>
+            </div>
+            """
+            comparison_bar = '<section class="candidate-overview"><div class="overview-head"><h2>Melody Candidates</h2><p>Compare toplines written against the same chord path, then open one candidate in detail below.</p></div><div class="candidate-tabs">' + ''.join(_candidate_tab(result, active_index) for result in candidates) + '</div></section>'
+            candidate_details = '<section class="candidate-details">' + ''.join(_candidate_detail(result, batch_meta, active_index) for result in candidates) + '</section>'
+
+        mute_controls = ''.join(
+            f'<button type="button" class="ghost mute-toggle" data-track-toggle="{track_name}" aria-pressed="false">Mute {track_name}</button>'
+            for track_name in TRACK_NAMES
+        )
+
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{TITLE} - Melody from Chords</title>
+  <style>
+    :root {{
+      --bg: #f1ede3;
+      --surface: rgba(255,255,255,0.82);
+      --surface-strong: #fffaf0;
+      --ink: #1f1a14;
+      --muted: #6d614e;
+      --line: rgba(31,26,20,0.15);
+      --accent: #b24a2b;
+      --accent-dark: #7f2f18;
+      --accent-soft: #d67b3d;
+      --shadow: 0 24px 60px rgba(73, 48, 25, 0.12);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: radial-gradient(circle at top left, rgba(178,74,43,0.18), transparent 30%), radial-gradient(circle at right 20%, rgba(234,216,183,0.75), transparent 28%), linear-gradient(180deg, #f1ede3 0%, #f7f2e9 100%); min-height: 100vh; }}
+    .shell {{ max-width: 1280px; margin: 0 auto; padding: 32px 20px 64px; }}
+    .hero {{ display: grid; gap: 14px; margin-bottom: 28px; }}
+    .eyebrow {{ letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-dark); font-size: 12px; }}
+    h1 {{ margin: 0; font-size: clamp(36px, 7vw, 82px); line-height: 0.95; max-width: 12ch; }}
+    .lead {{ max-width: 62ch; color: var(--muted); font-size: 18px; line-height: 1.6; }}
+    .layout {{ display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr); gap: 24px; align-items: start; }}
+    .panel {{ background: var(--surface); backdrop-filter: blur(10px); border: 1px solid var(--line); border-radius: 26px; padding: 22px; box-shadow: var(--shadow); }}
+    .panel h2 {{ margin-top: 0; font-size: 22px; }}
+    form {{ display: grid; gap: 16px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }}
+    label {{ display: grid; gap: 8px; font-size: 14px; color: var(--muted); }}
+    input, textarea {{ width: 100%; border: 1px solid rgba(31,26,20,0.14); border-radius: 16px; padding: 14px 16px; background: var(--surface-strong); color: var(--ink); font: inherit; }}
+    textarea {{ min-height: 180px; resize: vertical; }}
+    .hint {{ color: var(--muted); font-size: 13px; line-height: 1.5; }}
+    button {{ border: 0; border-radius: 999px; padding: 12px 18px; background: linear-gradient(135deg, var(--accent), var(--accent-soft)); color: white; font-size: 14px; font-weight: 700; cursor: pointer; }}
+    button.secondary {{ background: linear-gradient(135deg, #6b5840, #9b866c); }}
+    button.ghost {{ background: rgba(178,74,43,0.08); color: var(--accent-dark); border: 1px solid rgba(178,74,43,0.2); }}
+    .actions {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0 18px; }}
+    .actions form {{ display: block; }}
+    .specs {{ display: grid; gap: 12px; }}
+    .spec {{ padding: 14px 0; border-bottom: 1px solid var(--line); }}
+    .spec:last-child {{ border-bottom: 0; }}
+    .candidate-overview,.candidate-details {{ display: grid; gap: 18px; margin-top: 18px; }}
+    .overview-head p {{ margin: 0; color: var(--muted); }}
+    .candidate-tabs {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }}
+    .session-controls {{ display: grid; gap: 16px; margin-bottom: 18px; }}
+    .control-block {{ display: grid; gap: 8px; }}
+    .mute-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+    @media (max-width: 900px) {{ .layout {{ grid-template-columns: 1fr; }} .grid {{ grid-template-columns: 1fr; }} .mute-grid {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="eyebrow">FL Studio Melody Writer</div>
+      <h1>Chord In. Melody Out.</h1>
+      <p class="lead">Feed in a chord progression, generate multiple topline candidates, compare their contour, then reroll specific bars without changing the harmony.</p>
+      <p><a href="/">Back to Arrangement Generator</a></p>
+    </header>
+    <section class="layout">
+      <section class="panel">
+        <h2>Generate Melody Candidates</h2>
+        <form method="post" action="/generate-chords">
+          <label>
+            Chord Progression
+            <textarea name="chord_progression" placeholder="Examples: 1-5-6-4 or Am-F-C-G">{html.escape(state.get("chord_progression", ""))}</textarea>
+          </label>
+          <label>
+            Optional Style Prompt
+            <textarea name="text" placeholder="Example: dreamy rnb topline with wide phrases">{html.escape(state.get("text", ""))}</textarea>
+          </label>
+          <div class="grid">
+            <label>Tempo<input type="number" name="tempo" min="30" max="300" placeholder="auto" value="{html.escape(state.get("tempo", ""))}"></label>
+            <label>Key<input type="text" name="key" placeholder="Optional for degree input, example: A minor" value="{html.escape(state.get("key", ""))}"></label>
+            <label>Genre<input type="text" name="genre" placeholder="Example: trap, rnb, house" value="{html.escape(state.get("genre", ""))}"></label>
+            <label>Bars<input type="number" name="bars" min="1" max="128" placeholder="default: token count" value="{html.escape(state.get("bars", ""))}"></label>
+            <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
+            <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
+          </div>
+          <p class="hint">Supports both degree notation and named chords. One token equals one bar by default.</p>
+          <button type="submit">Generate Melodies</button>
+        </form>
+      </section>
+      <aside class="panel">
+        <h2>Session Controls</h2>
+        <div class="session-controls">
+          <div class="control-block">
+            <div><strong>Preview Volume</strong> <span id="volume-value">20%</span></div>
+            <input id="volume-slider" type="range" min="0" max="100" value="20">
+          </div>
+          <div class="control-block">
+            <div><strong>Part Mutes</strong></div>
+            <div class="mute-grid">{mute_controls}</div>
+          </div>
+        </div>
+        <div class="specs">
+          <div class="spec"><strong>Dual input format</strong>Use either degree input like <code>1-5-6-4</code> or named chords like <code>Am-F-C-G</code>.</div>
+          <div class="spec"><strong>Melody timeline</strong>Each detailed view shows the fixed chord path, melody focus notes, and chord-tone landing strength per bar.</div>
+          <div class="spec"><strong>Bar reroll</strong>Use <code>Reroll Melody</code> to regenerate only the selected bar while keeping the harmony fixed.</div>
+          <div class="spec"><strong>Saved selection</strong><code>Select This</code> stores the chosen option in <code>{BATCH_META_FILENAME}</code>.</div>
+        </div>
+      </aside>
+    </section>
+    {error_html}
+    {reroll_controls}
+    {comparison_bar}
+    {candidate_details or '<section class="panel"><p class="hint">Generate a candidate set to compare toplines against your chord progression.</p></section>'}
+  </main>
+  <script type="module">
+    import * as Tone from 'https://cdn.jsdelivr.net/npm/tone@15.0.4/+esm';
+    import {{ Midi }} from 'https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/+esm';
+
+    const TRACK_NAMES = ['Melody', 'Chords', 'Bass', 'Drums'];
+    let currentButtons = null;
+    let currentStop = null;
+    const synthRegistry = new Map();
+    const mutedTracks = new Set();
+    const DEFAULT_VOLUME = 20;
+    const volumeSlider = document.getElementById('volume-slider');
+    const volumeValue = document.getElementById('volume-value');
+    const masterGain = new Tone.Gain(DEFAULT_VOLUME / 100).toDestination();
+
+    function setPreviewVolume(value) {{
+      const normalized = Math.max(0, Math.min(100, Number(value) || 0));
+      masterGain.gain.value = normalized / 100;
+      if (volumeSlider) volumeSlider.value = String(normalized);
+      if (volumeValue) volumeValue.textContent = `${{normalized}}%`;
+    }}
+
+    function setTrackMuted(trackName, muted) {{
+      if (muted) mutedTracks.add(trackName); else mutedTracks.delete(trackName);
+      const synth = synthRegistry.get(trackName);
+      if (muted) synth?.releaseAll?.();
+      document.querySelectorAll(`[data-track-toggle="${{trackName}}"]`).forEach((button) => {{
+        button.classList.toggle('active', muted);
+        button.setAttribute('aria-pressed', muted ? 'true' : 'false');
+        button.textContent = `${{muted ? 'Unmute' : 'Mute'}} ${{trackName}}`;
+      }});
+    }}
+
+    function setActiveCandidate(candidateId) {{
+      document.querySelectorAll('[data-candidate-tab]').forEach((button) => button.classList.toggle('active', button.dataset.candidateTab === candidateId));
+      document.querySelectorAll('[data-candidate-detail]').forEach((panel) => panel.classList.toggle('active', panel.dataset.candidateDetail === candidateId));
+    }}
+
+    setPreviewVolume(DEFAULT_VOLUME);
+    TRACK_NAMES.forEach((trackName) => setTrackMuted(trackName, false));
+
+    function makeSynthForTrack(name) {{
+      if (name === 'Drums') return new Tone.MembraneSynth().connect(masterGain);
+      if (name === 'Bass') return new Tone.MonoSynth({{ oscillator: {{ type: 'square' }}, envelope: {{ attack: 0.01, release: 0.2 }}, volume: -14 }}).connect(masterGain);
+      if (name === 'Chords') return new Tone.PolySynth(Tone.Synth, {{ oscillator: {{ type: 'triangle' }}, envelope: {{ attack: 0.02, release: 0.3 }}, volume: -18 }}).connect(masterGain);
+      return new Tone.PolySynth(Tone.Synth, {{ oscillator: {{ type: 'sine' }}, envelope: {{ attack: 0.01, release: 0.2 }}, volume: -16 }}).connect(masterGain);
+    }}
+
+    async function stopPlayback() {{
+      if (currentStop) {{ currentStop(); currentStop = null; }}
+      Tone.Transport.stop();
+      Tone.Transport.cancel();
+      for (const synth of synthRegistry.values()) synth.releaseAll?.();
+      if (currentButtons) {{ currentButtons.play.disabled = false; currentButtons.stop.disabled = true; currentButtons = null; }}
+    }}
+
+    async function playCandidate(url, buttons, segment = null) {{
+      await Tone.start();
+      await stopPlayback();
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Failed to load preview: ${{response.status}}`);
+      const midi = new Midi(await response.arrayBuffer());
+      let lastTime = 0;
+      const ppq = midi.header.ppq || 480;
+      const tempo = segment?.tempo || 120;
+      const secPerTick = 60 / tempo / ppq;
+      midi.tracks.forEach((track, index) => {{
+        if (!track.notes.length) return;
+        const name = track.name || `Track ${{index + 1}}`;
+        let synth = synthRegistry.get(name);
+        if (!synth) {{ synth = makeSynthForTrack(name); synthRegistry.set(name, synth); }}
+        track.notes.forEach((note) => {{
+          let startTime = note.time;
+          let duration = note.duration;
+          if (segment) {{
+            const noteStart = note.ticks ?? Math.round(note.time / secPerTick);
+            const noteDurationTicks = note.durationTicks ?? Math.round(note.duration / secPerTick);
+            const noteEnd = noteStart + noteDurationTicks;
+            if (noteEnd <= segment.startTick || noteStart >= segment.endTick) return;
+            const overlapStart = Math.max(noteStart, segment.startTick);
+            const overlapEnd = Math.min(noteEnd, segment.endTick);
+            startTime = (overlapStart - segment.startTick) * secPerTick;
+            duration = Math.max(secPerTick / 4, (overlapEnd - overlapStart) * secPerTick);
+          }}
+          lastTime = Math.max(lastTime, startTime + duration);
+          Tone.Transport.schedule((time) => {{
+            if (mutedTracks.has(name)) return;
+            synth.triggerAttackRelease(note.name, duration, time, Math.max(0.08, (note.velocity || 0.7) * 0.35));
+          }}, startTime);
+        }});
+      }});
+      Tone.Transport.position = 0;
+      Tone.Transport.start();
+      buttons.play.disabled = true;
+      buttons.stop.disabled = false;
+      currentButtons = buttons;
+      currentStop = () => {{ Tone.Transport.stop(); Tone.Transport.cancel(); }};
+      setTimeout(() => {{ if (currentButtons === buttons) stopPlayback(); }}, Math.ceil((lastTime + 0.5) * 1000));
+    }}
+
+    function bindPreviewButtons(root = document) {{
+      root.querySelectorAll('[data-preview-url]').forEach((button) => {{
+        if (button.dataset.boundPreview === '1') return;
+        button.dataset.boundPreview = '1';
+        button.addEventListener('click', async () => {{
+          const detail = button.closest('[data-candidate-detail]');
+          const stop = detail ? detail.querySelector('[data-stop]') : document.querySelector('[data-candidate-detail].active [data-stop]');
+          const segment = button.dataset.previewStart ? {{ startTick: Number(button.dataset.previewStart), endTick: Number(button.dataset.previewEnd), tempo: Number(button.dataset.previewTempo || 120) }} : null;
+          try {{ await playCandidate(button.dataset.previewUrl, {{ play: button, stop }}, segment); }} catch (error) {{ console.error(error); await stopPlayback(); }}
+        }});
+      }});
+    }}
+
+    function bindStopButtons(root = document) {{
+      root.querySelectorAll('[data-stop]').forEach((button) => {{
+        if (button.dataset.boundStop === '1') return;
+        button.dataset.boundStop = '1';
+        button.addEventListener('click', async () => {{ await stopPlayback(); }});
+      }});
+    }}
+
+    function bindCandidateTabs(root = document) {{
+      root.querySelectorAll('[data-candidate-tab]').forEach((button) => {{
+        if (button.dataset.boundTab === '1') return;
+        button.dataset.boundTab = '1';
+        button.addEventListener('click', () => {{ setActiveCandidate(button.dataset.candidateTab); }});
+      }});
+    }}
+
+    async function rerollBar(form) {{
+      const candidateIndex = form.querySelector('[name="candidate_index"]').value;
+      const barIndex = form.querySelector('[name="bar_index"]').value;
+      const tab = document.getElementById(`candidate-tab-${{candidateIndex}}`);
+      const progress = document.getElementById(`candidate-progress-${{candidateIndex}}`);
+      const errorNode = form.closest('.bar-card')?.querySelector('.inline-error') || form.closest('.bar')?.querySelector('.inline-error');
+      const formData = new FormData(form);
+      formData.set('fragment', '1');
+      try {{
+        const response = await fetch('/reroll-bar', {{ method: 'POST', body: formData }});
+        const html = await response.text();
+        if (!response.ok) throw new Error(html || `Reroll failed: ${{response.status}}`);
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const nextTab = doc.querySelector('[data-fragment="candidate-tab"] > *');
+        const nextProgress = doc.querySelector('[data-fragment="candidate-progress"] > *');
+        const nextBar = doc.querySelector('[data-fragment="bar-card"] > *');
+        if (nextTab && tab) {{ tab.replaceWith(nextTab); bindCandidateTabs(document); }}
+        if (nextProgress && progress) progress.replaceWith(nextProgress);
+        const currentBar = document.getElementById(`candidate-${{candidateIndex}}-bar-${{barIndex}}`);
+        if (nextBar && currentBar) {{ currentBar.replaceWith(nextBar); bindPreviewButtons(document); bindRerollForms(document); }}
+      }} catch (error) {{
+        if (errorNode) {{ errorNode.hidden = false; errorNode.textContent = error instanceof Error ? error.message : String(error); }}
+      }}
+    }}
+
+    function bindRerollForms(root = document) {{
+      root.querySelectorAll('[data-reroll-bar-form]').forEach((form) => {{
+        if (form.dataset.boundReroll === '1') return;
+        form.dataset.boundReroll = '1';
+        form.addEventListener('submit', async (event) => {{ event.preventDefault(); await rerollBar(form); }});
+      }});
+    }}
+
+    if (volumeSlider) volumeSlider.addEventListener('input', (event) => setPreviewVolume(event.target.value));
+    document.querySelectorAll('[data-track-toggle]').forEach((button) => button.addEventListener('click', () => setTrackMuted(button.dataset.trackToggle, !mutedTracks.has(button.dataset.trackToggle))));
+    bindPreviewButtons(document);
+    bindStopButtons(document);
+    bindCandidateTabs(document);
+    bindRerollForms(document);
+    const initialCandidate = document.querySelector('[data-candidate-tab].active')?.dataset.candidateTab;
+    if (initialCandidate) setActiveCandidate(initialCandidate);
+    window.addEventListener('beforeunload', () => {{ stopPlayback(); }});
+  </script>
+</body>
+</html>"""
+
     @staticmethod
     def _respond_html(start_response: Callable, status: str, body: str):
         payload = body.encode("utf-8")
@@ -740,7 +1101,7 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
     preview_url_escaped = html.escape(preview_url)
     tempo = int(meta.get("tempo") or 120)
     file_list = ''.join(f'<li><code>{html.escape(path.name)}</code></li>' for path in result.files)
-    timeline = _timeline_blocks(meta.get("bar_summary", []), batch_dir, candidate_index, preview_url_escaped, tempo)
+    timeline = _timeline_blocks(meta.get("bar_summary", []), batch_dir, candidate_index, preview_url_escaped, tempo, str(meta.get("bar_action_label", "Reroll Harmony")))
     selected_option = None if not batch_meta else batch_meta.get("selected_option")
     selected = selected_option == meta.get("candidate_index")
     select_form = f"""
@@ -775,8 +1136,8 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
         </div>
         <div class="panel timeline-panel">
           <div class="timeline-head">
-            <h3>Harmony Timeline</h3>
-            <p>Each bar shows the chosen chord, representative melody tones, and how much of the melody sits inside the chord tones.</p>
+            <h3>{html.escape(str(meta.get("timeline_title", "Harmony Timeline")))}</h3>
+            <p>{html.escape(str(meta.get("timeline_description", "Each bar shows the chosen chord, representative melody tones, and how much of the melody sits inside the chord tones.")))}</p>
           </div>
           <div class="timeline-grid">{timeline}</div>
         </div>
@@ -785,16 +1146,16 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
     """
 
 
-def _timeline_blocks(bar_summary: list[dict[str, object]], batch_dir: Path, candidate_index: int, preview_url: str, tempo: int) -> str:
+def _timeline_blocks(bar_summary: list[dict[str, object]], batch_dir: Path, candidate_index: int, preview_url: str, tempo: int, action_label: str) -> str:
     if not bar_summary:
         return '<div class="bar-card"><div class="bar-meta">No timeline data available.</div></div>'
     cards = []
     for bar in bar_summary:
-        cards.append(_bar_card(bar, batch_dir, candidate_index, preview_url, tempo))
+        cards.append(_bar_card(bar, batch_dir, candidate_index, preview_url, tempo, action_label))
     return ''.join(cards)
 
 
-def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, preview_url: str, tempo: int) -> str:
+def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, preview_url: str, tempo: int, action_label: str) -> str:
     percent = int(bar.get("matching_percent", 0) or 0)
     melody = ", ".join(str(value) for value in bar.get("representative_melody_pitches", [])) or "-"
     chord_tones = ", ".join(str(value) for value in bar.get("chord_tones", [])) or "-"
@@ -838,7 +1199,7 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
                   <input type="hidden" name="candidate_index" value="{candidate_index}">
                   <input type="hidden" name="bar_index" value="{bar_index}">
                   <input type="hidden" name="reroll_nonce" value="{reroll_nonce}">
-                  <button type="submit" class="secondary bar-action-btn">Reroll Harmony</button>
+                  <button type="submit" class="secondary bar-action-btn">{html.escape(action_label)}</button>
                 </form>
               </div>
               <div class="inline-error" hidden></div>
@@ -857,6 +1218,40 @@ def _state_from_request(request: GenerationRequest, count: int) -> dict[str, str
         "count": str(count),
         "melody_source": "" if request.melody_midi_path is None else str(request.melody_midi_path),
     }
+
+
+def _state_from_chords_request(request: GenerationRequest, count: int) -> dict[str, str]:
+    return {
+        "text": request.text or "",
+        "chord_progression": request.chord_progression or "",
+        "tempo": "" if request.tempo is None else str(request.tempo),
+        "key": request.key or "",
+        "genre": request.genre or "",
+        "bars": "" if request.bars is None else str(request.bars),
+        "seed": "" if request.seed is None else str(request.seed),
+        "count": str(count),
+    }
+
+
+def _state_from_batch_chords(batch_meta: dict[str, object], count: int) -> dict[str, str]:
+    return {
+        "text": _string_value(batch_meta.get("text")),
+        "chord_progression": _string_value(batch_meta.get("source_progression")),
+        "tempo": _string_value(batch_meta.get("tempo")),
+        "key": _string_value(batch_meta.get("key")),
+        "genre": _string_value(batch_meta.get("genre")),
+        "bars": _string_value(batch_meta.get("bars")),
+        "seed": _string_value(batch_meta.get("seed")),
+        "count": _string_value(batch_meta.get("candidate_count")) or str(count),
+    }
+
+
+def _is_chords_batch(batch_meta: dict[str, object] | None) -> bool:
+    if not batch_meta:
+        return False
+    if batch_meta.get("generator_mode") == "melody_from_chords":
+        return True
+    return bool(batch_meta.get("source_progression"))
 
 
 def _hidden_state_fields(state: dict[str, str] | None) -> str:

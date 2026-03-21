@@ -1,11 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import Counter
 import random
 
 from .models import Arrangement, BAR_TICKS, MelodyAnalysis, NoteEvent, TextFeatures
-from .music_theory import clamp_pitch, degree_pitch_class, midi_for_pitch_class, normalize_key_name, scale_for
+from .music_theory import clamp_pitch, midi_for_pitch_class, normalize_key_name, scale_for
+from .progression import ChordBar, ParsedProgression
 
 
 GENRE_TEMPOS = {
@@ -141,6 +142,34 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
     )
 
 
+def build_arrangement_from_progression(*, progression: ParsedProgression, text_features: TextFeatures | None, tempo: int | None, seed: int | None) -> Arrangement:
+    randomizer = random.Random(seed)
+    resolved_tempo = tempo or _default_tempo_for(text_features)
+    style_tags = list(text_features.style_tags) if text_features else []
+    chords = _generate_fixed_progression_chords(progression.chord_bars)
+    melody = _generate_melody_from_progression(progression, text_features, randomizer)
+    bass, bass_pattern = _generate_bassline(chords, text_features, randomizer)
+    drums, drum_pattern = _generate_drum_pattern(progression.bars, text_features, randomizer)
+    degrees = [bar.degree for bar in progression.chord_bars]
+    preview = '-'.join(bar.source_token for bar in progression.chord_bars[:4])
+    label = f'ChordLine {preview}' if preview else 'ChordLine'
+    return Arrangement(
+        melody=melody,
+        chords=chords,
+        bass=bass,
+        drums=drums,
+        tempo_bpm=resolved_tempo,
+        key=progression.key,
+        mode=progression.mode,
+        bars=progression.bars,
+        style_tags=style_tags,
+        progression_label=label,
+        progression_degrees=degrees,
+        drum_pattern=drum_pattern,
+        bass_pattern=bass_pattern,
+    )
+
+
 def _resolve_mode(text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None) -> str:
     if melody_analysis:
         return melody_analysis.mode
@@ -176,6 +205,13 @@ def _generate_progression_chords(key: str, mode: str, bars: int, progression: li
         degree = progression[bar % len(progression)]
         option = _pick_text_chord_option(key, mode, degree, bar, bars, randomizer)
         notes.extend(_bar_chord_notes(option, bar * BAR_TICKS))
+    return notes
+
+
+def _generate_fixed_progression_chords(chord_bars: list[ChordBar]) -> list[NoteEvent]:
+    notes: list[NoteEvent] = []
+    for bar_index, chord_bar in enumerate(chord_bars):
+        notes.extend(_bar_notes_from_pitch_classes(chord_bar.root_pc, chord_bar.pitch_classes, bar_index * BAR_TICKS))
     return notes
 
 
@@ -220,7 +256,7 @@ def _generate_chords_for_melody(key: str, mode: str, melody: list[NoteEvent], ba
 
     selected_options = [choices[index] for index in selected_indices]
     notes: list[NoteEvent] = []
-    degrees: list[int] = []
+    degrees: list[int | None] = []
     flavors: list[str] = []
     for bar, option in enumerate(selected_options):
         notes.extend(_bar_chord_notes(option, bar * BAR_TICKS))
@@ -313,8 +349,7 @@ def _score_chord_option(bar_notes: list[NoteEvent], option: ChordOption, bar: in
             score += 0.8
     elif option.label in {"sus2", "sus4"}:
         score += 0.2
-        third_pc = option.pitch_classes[1] if option.label == "sus2" else option.pitch_classes[1]
-        if strong_pc == third_pc:
+        if strong_pc == option.pitch_classes[1]:
             score -= 1.2
 
     score += profile.degree_bias.get(option.degree, 0.0)
@@ -355,7 +390,7 @@ def _build_harmony_profile(randomizer: random.Random) -> HarmonyProfile:
 
 
 def _bar_chord_notes(option: ChordOption, start_tick: int) -> list[NoteEvent]:
-    pitches = _voice_option(option)
+    pitches = _voice_pitch_classes(option.root_pc, option.pitch_classes)
     velocities = [72, 68, 68, 64, 62]
     return [
         NoteEvent(pitch=pitch, start=start_tick, duration=BAR_TICKS, velocity=velocities[min(index, len(velocities) - 1)], channel=1)
@@ -363,11 +398,20 @@ def _bar_chord_notes(option: ChordOption, start_tick: int) -> list[NoteEvent]:
     ]
 
 
-def _voice_option(option: ChordOption) -> list[int]:
-    root_pitch = midi_for_pitch_class(option.root_pc, 4)
+def _bar_notes_from_pitch_classes(root_pc: int, pitch_classes: tuple[int, ...], start_tick: int) -> list[NoteEvent]:
+    pitches = _voice_pitch_classes(root_pc, pitch_classes)
+    velocities = [72, 68, 68, 64, 62]
+    return [
+        NoteEvent(pitch=pitch, start=start_tick, duration=BAR_TICKS, velocity=velocities[min(index, len(velocities) - 1)], channel=1)
+        for index, pitch in enumerate(pitches)
+    ]
+
+
+def _voice_pitch_classes(root_pc: int, pitch_classes: tuple[int, ...]) -> list[int]:
+    root_pitch = midi_for_pitch_class(root_pc, 4)
     pitches = [root_pitch]
     reference = root_pitch + 1
-    for pitch_class in option.pitch_classes[1:]:
+    for pitch_class in pitch_classes[1:]:
         pitch = _pitch_at_or_above(pitch_class, reference)
         pitches.append(clamp_pitch(pitch, 48, 84))
         reference = pitch + 1
@@ -411,6 +455,90 @@ def _generate_topline(key: str, mode: str, chords: list[NoteEvent], bars: int, r
             notes.append(NoteEvent(pitch=pitch, start=bar * BAR_TICKS + offset, duration=duration, velocity=92, channel=0))
             last_pitch = pitch
     return notes
+
+
+def _generate_melody_from_progression(progression: ParsedProgression, text_features: TextFeatures | None, randomizer: random.Random) -> list[NoteEvent]:
+    scale = scale_for(progression.key, progression.mode)
+    genre = text_features.genre if text_features else 'pop'
+    energy = text_features.energy if text_features else 'medium'
+    rhythm_pool = _rhythm_pool_for(genre, energy)
+    contour_bias = randomizer.choice([-1, 1])
+    notes: list[NoteEvent] = []
+    last_pitch = midi_for_pitch_class(progression.chord_bars[0].root_pc, 5)
+    phrase_length = 4 if progression.bars >= 4 else progression.bars
+
+    for bar_index, chord_bar in enumerate(progression.chord_bars):
+        bar_start = bar_index * BAR_TICKS
+        rhythm = randomizer.choice(rhythm_pool)
+        melody_targets = list(chord_bar.pitch_classes)
+        if chord_bar.root_pc not in melody_targets:
+            melody_targets.insert(0, chord_bar.root_pc)
+        for step_index, offset in enumerate(rhythm):
+            strong = step_index == 0 or offset % (BAR_TICKS // 2) == 0
+            cadence = ((bar_index + 1) % phrase_length == 0 and step_index == len(rhythm) - 1) or (bar_index == progression.bars - 1 and step_index == len(rhythm) - 1)
+            pitch_class = _pick_melody_pitch_class(scale, melody_targets, chord_bar, strong, cadence, last_pitch, contour_bias, randomizer)
+            pitch = _nearest_melodic_pitch(pitch_class, last_pitch, 60, 84)
+            next_offset = rhythm[step_index + 1] if step_index + 1 < len(rhythm) else BAR_TICKS
+            duration = max(BAR_TICKS // 8, min(BAR_TICKS // 2, next_offset - offset))
+            velocity = 96 if strong else 84
+            notes.append(NoteEvent(pitch=pitch, start=bar_start + offset, duration=duration, velocity=velocity, channel=0))
+            last_pitch = pitch
+        contour_bias *= -1 if randomizer.random() < 0.35 else 1
+    return notes
+
+
+def _rhythm_pool_for(genre: str, energy: str) -> list[list[int]]:
+    if genre == 'house':
+        return [
+            [0, BAR_TICKS // 4, BAR_TICKS // 2, BAR_TICKS * 3 // 4],
+            [0, BAR_TICKS // 4, BAR_TICKS // 2, BAR_TICKS * 5 // 8, BAR_TICKS * 7 // 8],
+        ]
+    if genre == 'trap':
+        return [
+            [0, BAR_TICKS * 3 // 8, BAR_TICKS // 2, BAR_TICKS * 3 // 4],
+            [0, BAR_TICKS // 4, BAR_TICKS * 5 // 8, BAR_TICKS * 7 // 8],
+            [0, BAR_TICKS // 6, BAR_TICKS // 2, BAR_TICKS * 5 // 6],
+        ]
+    if genre == 'rnb':
+        return [
+            [0, BAR_TICKS // 3, BAR_TICKS * 2 // 3],
+            [0, BAR_TICKS // 4, BAR_TICKS * 5 // 8, BAR_TICKS * 7 // 8],
+            [0, BAR_TICKS // 4, BAR_TICKS // 2, BAR_TICKS * 3 // 4],
+        ]
+    if energy == 'low':
+        return [
+            [0, BAR_TICKS // 2],
+            [0, BAR_TICKS // 3, BAR_TICKS * 2 // 3],
+        ]
+    return [
+        [0, BAR_TICKS // 4, BAR_TICKS // 2, BAR_TICKS * 3 // 4],
+        [0, BAR_TICKS // 3, BAR_TICKS * 2 // 3, BAR_TICKS * 5 // 6],
+        [0, BAR_TICKS // 2, BAR_TICKS * 3 // 4],
+    ]
+
+
+def _pick_melody_pitch_class(scale: list[int], melody_targets: list[int], chord_bar: ChordBar, strong: bool, cadence: bool, last_pitch: int, contour_bias: int, randomizer: random.Random) -> int:
+    if cadence:
+        return chord_bar.root_pc
+    if strong:
+        return randomizer.choice(melody_targets[: min(3, len(melody_targets))])
+    last_pc = last_pitch % 12
+    if randomizer.random() < 0.65:
+        return randomizer.choice(melody_targets)
+    scale_index = scale.index(last_pc) if last_pc in scale else 0
+    shift = randomizer.choice([1, 1, 2]) * contour_bias
+    return scale[(scale_index + shift) % len(scale)]
+
+
+def _nearest_melodic_pitch(pitch_class: int, reference: int, low: int, high: int) -> int:
+    candidates = []
+    for octave in range(3, 8):
+        pitch = midi_for_pitch_class(pitch_class, octave)
+        if low <= pitch <= high:
+            candidates.append(pitch)
+    if not candidates:
+        return clamp_pitch(midi_for_pitch_class(pitch_class, 5), low, high)
+    return min(candidates, key=lambda pitch: (abs(pitch - reference), pitch))
 
 
 def _normalize_melody(notes: list[NoteEvent], bars: int) -> list[NoteEvent]:

@@ -277,3 +277,70 @@ def test_web_files_serves_preview_midi(tmp_path: Path) -> None:
 
     assert captured["status"] == "200 OK"
     assert payload[:4] == b"MThd"
+
+def test_generate_from_chord_progression(tmp_path: Path) -> None:
+    result = generate_song(
+        GenerationRequest(
+            chord_progression="1-5-6-4",
+            text="dreamy rnb topline",
+            bars=4,
+            seed=21,
+            output_dir=tmp_path,
+        )
+    )
+
+    assert result.metadata["input_mode"] == "text+chords"
+    assert result.metadata["ui_mode"] == "melody_from_chords"
+    assert result.metadata["timeline_title"] == "Melody Timeline"
+    assert result.metadata["bar_action_label"] == "Reroll Melody"
+    assert len(result.metadata["bar_summary"]) == 4
+    parsed_tracks, _ = parse_midi_notes(result.output_dir / "melody.mid")
+    melodic_track = next(track for track in parsed_tracks if track.notes)
+    assert melodic_track.notes
+
+
+def test_reroll_chord_progression_bar_updates_melody(tmp_path: Path) -> None:
+    results = generate_candidates(
+        GenerationRequest(
+            chord_progression="Am-F-C-G",
+            text="dreamy rnb topline",
+            bars=4,
+            seed=31,
+            output_dir=tmp_path,
+        ),
+        count=2,
+    )
+    batch_dir = results[0].output_dir.parent
+    before_tracks, _ = parse_midi_notes(results[0].output_dir / "melody.mid")
+    before = next(track for track in before_tracks if track.notes).notes
+    rerolled = reroll_candidate_bar(batch_dir, candidate_index=1, bar_index=2, reroll_nonce=1234)
+    after_tracks, _ = parse_midi_notes(results[0].output_dir / "melody.mid")
+    after = next(track for track in after_tracks if track.notes).notes
+
+    assert rerolled["candidates"][0]["full_progression_text"]
+    assert before != after
+    meta = json.loads((results[0].output_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["reroll_scope"] == "bar_melody"
+    assert meta["bar_action_label"] == "Reroll Melody"
+
+
+def test_web_chord_page_renders(tmp_path: Path) -> None:
+    app = Py2FLWebApp(output_dir=tmp_path)
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = headers
+
+    body = b"".join(app({
+        "REQUEST_METHOD": "GET",
+        "PATH_INFO": "/melody-from-chords",
+        "wsgi.input": io.BytesIO(b""),
+        "CONTENT_LENGTH": "0",
+        "CONTENT_TYPE": "text/plain",
+    }, start_response)).decode("utf-8")
+
+    assert captured["status"] == "200 OK"
+    assert "Chord In. Melody Out." in body
+    assert "Generate Melodies" in body
+    assert "1-5-6-4" in body
