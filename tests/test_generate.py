@@ -1,7 +1,8 @@
-﻿import io
+import io
+import json
 from pathlib import Path
 
-from py2fl.generator import generate_candidates, generate_song
+from py2fl.generator import BATCH_META_FILENAME, generate_candidates, generate_song, load_batch_meta
 from py2fl.midi import parse_midi_notes, write_midi
 from py2fl.models import BAR_TICKS, GenerationRequest, NoteEvent, TrackData
 from py2fl.web import Py2FLWebApp
@@ -21,6 +22,12 @@ def test_generate_candidates_creates_multiple_options(tmp_path: Path) -> None:
     assert all(result.output_dir.name.startswith("option_") for result in results)
     labels = {result.metadata["progression_label"] for result in results}
     assert len(labels) >= 2
+
+    batch_meta = load_batch_meta(results[0].output_dir.parent)
+    assert batch_meta["candidate_count"] == 4
+    assert batch_meta["selected_option"] is None
+    assert len(batch_meta["candidates"]) == 4
+    assert batch_meta["candidates"][0]["preview_file"] == "full_arrangement.mid"
 
 
 def test_generate_from_melody_preserves_melody(tmp_path: Path) -> None:
@@ -103,4 +110,52 @@ def test_web_app_renders_home(tmp_path: Path) -> None:
 
     assert captured["status"] == "200 OK"
     assert "Generate Options" in body
-    assert "Reroll Chords" in body or "Create Candidate Set" in body
+    assert "Create Candidate Set" in body
+
+
+def test_web_select_persists_batch_choice(tmp_path: Path) -> None:
+    app = Py2FLWebApp(output_dir=tmp_path)
+    results = generate_candidates(GenerationRequest(text="dreamy rnb night drive", bars=4, seed=11, output_dir=tmp_path), count=3)
+    batch_dir = results[0].output_dir.parent
+    body_bytes = f"batch_dir={batch_dir}&candidate_index=2".encode("utf-8")
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = headers
+
+    body = b"".join(app({
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/select",
+        "wsgi.input": io.BytesIO(body_bytes),
+        "CONTENT_LENGTH": str(len(body_bytes)),
+        "CONTENT_TYPE": "application/x-www-form-urlencoded",
+    }, start_response)).decode("utf-8")
+
+    batch_meta = json.loads((batch_dir / BATCH_META_FILENAME).read_text(encoding="utf-8"))
+    assert captured["status"] == "200 OK"
+    assert batch_meta["selected_option"] == 2
+    assert "Selected Candidate" in body
+
+
+def test_web_files_serves_preview_midi(tmp_path: Path) -> None:
+    app = Py2FLWebApp(output_dir=tmp_path)
+    results = generate_candidates(GenerationRequest(text="dark trap anthem", bars=4, seed=9, output_dir=tmp_path), count=2)
+    preview_file = results[0].output_dir / "full_arrangement.mid"
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = headers
+
+    payload = b"".join(app({
+        "REQUEST_METHOD": "GET",
+        "PATH_INFO": "/files",
+        "QUERY_STRING": f"path={preview_file}",
+        "wsgi.input": io.BytesIO(b""),
+        "CONTENT_LENGTH": "0",
+        "CONTENT_TYPE": "text/plain",
+    }, start_response))
+
+    assert captured["status"] == "200 OK"
+    assert payload[:4] == b"MThd"

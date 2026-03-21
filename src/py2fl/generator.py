@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import json
 import random
 import re
 
@@ -11,6 +12,8 @@ from .midi import write_meta, write_midi
 from .models import Arrangement, GenerationRequest, GenerationResult, TrackData
 from .music_theory import key_label
 from .text_analysis import analyze_text
+
+BATCH_META_FILENAME = "batch_meta.json"
 
 
 def generate_song(request: GenerationRequest) -> GenerationResult:
@@ -81,9 +84,79 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 bass_pattern=arrangement.bass_pattern,
             )
         candidate_dir = batch_dir / f"option_{index + 1:02d}"
-        results.append(_write_arrangement(candidate_dir, arrangement, request, candidate_index=index + 1, candidate_seed=candidate_seed, reroll_scope=reroll_scope))
+        result = _write_arrangement(candidate_dir, arrangement, request, candidate_index=index + 1, candidate_seed=candidate_seed, reroll_scope=reroll_scope)
+        result.metadata["batch_dir"] = str(batch_dir)
+        result.metadata["option_name"] = candidate_dir.name
+        results.append(result)
 
+    write_batch_meta(batch_dir, request, results, selected_option=None)
     return results
+
+
+def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[GenerationResult], selected_option: int | None) -> Path:
+    batch_dir = Path(batch_dir)
+    selected_candidate = None
+    if selected_option is not None:
+        for result in results:
+            if result.metadata.get("candidate_index") == selected_option:
+                selected_candidate = result
+                break
+
+    payload = {
+        "text": request.text,
+        "source_melody": str(request.melody_midi_path) if request.melody_midi_path else None,
+        "tempo": request.tempo,
+        "key": request.key,
+        "genre": request.genre,
+        "bars": request.bars,
+        "seed": request.seed,
+        "candidate_count": len(results),
+        "selected_option": selected_option,
+        "selected_output_dir": None if selected_candidate is None else str(selected_candidate.output_dir),
+        "candidates": [
+            {
+                "candidate_index": result.metadata.get("candidate_index"),
+                "option_name": result.metadata.get("option_name") or Path(result.output_dir).name,
+                "output_dir": str(result.output_dir),
+                "progression_label": result.metadata.get("progression_label"),
+                "candidate_seed": result.metadata.get("candidate_seed"),
+                "tempo": result.metadata.get("tempo"),
+                "key": result.metadata.get("key"),
+                "drum_pattern": result.metadata.get("drum_pattern"),
+                "bass_pattern": result.metadata.get("bass_pattern"),
+                "style_tags": result.metadata.get("style_tags"),
+                "preview_file": "full_arrangement.mid",
+            }
+            for result in results
+        ],
+    }
+    meta_path = batch_dir / BATCH_META_FILENAME
+    write_meta(meta_path, payload)
+    return meta_path
+
+
+def load_batch_meta(batch_dir: Path) -> dict[str, object]:
+    meta_path = Path(batch_dir) / BATCH_META_FILENAME
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Batch metadata not found: {meta_path}")
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def select_candidate(batch_dir: Path, candidate_index: int) -> dict[str, object]:
+    batch_dir = Path(batch_dir)
+    meta = load_batch_meta(batch_dir)
+    candidates = meta.get("candidates", [])
+    selected = None
+    for candidate in candidates:
+        if candidate.get("candidate_index") == candidate_index:
+            selected = candidate
+            break
+    if selected is None:
+        raise ValueError(f"Candidate {candidate_index} not found in batch")
+    meta["selected_option"] = candidate_index
+    meta["selected_output_dir"] = selected.get("output_dir")
+    write_meta(batch_dir / BATCH_META_FILENAME, meta)
+    return meta
 
 
 def _prepare_context(request: GenerationRequest) -> dict[str, object]:
@@ -131,6 +204,7 @@ def _write_arrangement(run_dir: Path, arrangement: Arrangement, request: Generat
         "candidate_index": candidate_index,
         "candidate_seed": candidate_seed,
         "reroll_scope": reroll_scope,
+        "preview_file": "full_arrangement.mid",
     }
     meta_path = run_dir / "meta.json"
     write_meta(meta_path, metadata)
