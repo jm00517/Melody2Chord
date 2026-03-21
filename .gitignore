@@ -13,3 +13,8 @@ tmp_split_midi/
 web_manual_runs/
 web_manual_runs_1774089226/
 *.mid
+candidate_manual_runs/
+reroll_chords_check/
+tempo_check_cli/
+tempo_check_runs/
+tmp_candidate_cli/

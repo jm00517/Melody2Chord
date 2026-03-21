@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +59,10 @@ class Arrangement:
     mode: str
     bars: int
     style_tags: list[str] = field(default_factory=list)
+    progression_label: str = ""
+    progression_degrees: list[int] = field(default_factory=list)
+    drum_pattern: str = ""
+    bass_pattern: str = ""
 
 
 @dataclass(slots=True)

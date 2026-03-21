@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .generator import generate_song
+from .generator import generate_candidates, generate_song
 from .models import GenerationRequest
 from .web import run_server
 
@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--genre", help="Genre hint, for example trap or rnb.")
     generate_parser.add_argument("--bars", type=int, help="Number of bars to generate.")
     generate_parser.add_argument("--seed", type=int, help="Random seed for reproducible output.")
+    generate_parser.add_argument("--count", type=int, default=1, help="Number of candidate options to generate.")
     generate_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory.")
 
     serve_parser = subparsers.add_parser("serve", help="Run the local web UI.")
@@ -47,12 +48,26 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             output_dir=args.out,
         )
-        result = generate_song(request)
-        print(json.dumps({
-            "output_dir": str(result.output_dir),
-            "files": [str(path) for path in result.files],
-            "metadata": result.metadata,
-        }, indent=2))
+        if args.count > 1:
+            results = generate_candidates(request, count=args.count)
+            print(json.dumps({
+                "batch_output_dir": str(results[0].output_dir.parent),
+                "candidates": [
+                    {
+                        "output_dir": str(result.output_dir),
+                        "files": [str(path) for path in result.files],
+                        "metadata": result.metadata,
+                    }
+                    for result in results
+                ],
+            }, indent=2))
+        else:
+            result = generate_song(request)
+            print(json.dumps({
+                "output_dir": str(result.output_dir),
+                "files": [str(path) for path in result.files],
+                "metadata": result.metadata,
+            }, indent=2))
         return 0
 
     if args.command == "serve":

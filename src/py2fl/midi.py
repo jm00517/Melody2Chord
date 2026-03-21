@@ -4,7 +4,7 @@ import json
 import struct
 from pathlib import Path
 
-from .models import BAR_TICKS, NoteEvent, TrackData
+from .models import BAR_TICKS, NoteEvent, PPQ, TrackData
 
 
 def _read_vlq(data: bytes, index: int) -> tuple[int, int]:
@@ -100,8 +100,11 @@ def parse_midi_notes(path: Path) -> tuple[list[TrackData], int | None]:
                 stack = active.get((channel, data1))
                 if stack:
                     start, velocity = stack.pop()
-                    duration = max(division // 8, abs_time - start)
-                    notes.append(NoteEvent(pitch=data1, start=start, duration=duration, velocity=velocity, channel=channel))
+                    scaled_start = _scale_ticks(start, division)
+                    scaled_end = _scale_ticks(abs_time, division)
+                    minimum_duration = max(1, _scale_ticks(max(1, division // 8), division))
+                    duration = max(minimum_duration, scaled_end - scaled_start)
+                    notes.append(NoteEvent(pitch=data1, start=scaled_start, duration=duration, velocity=velocity, channel=channel))
 
         tracks.append(TrackData(name=name, notes=sorted(notes, key=lambda note: (note.start, note.pitch))))
 
@@ -165,3 +168,9 @@ def infer_bars_from_notes(notes: list[NoteEvent]) -> int:
         return 4
     last_tick = max(note.end for note in notes)
     return max(1, (last_tick + BAR_TICKS - 1) // BAR_TICKS)
+
+
+def _scale_ticks(value: int, source_ppq: int) -> int:
+    if source_ppq == PPQ:
+        return value
+    return round(value * PPQ / source_ppq)
