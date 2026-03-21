@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+exports/
+manual_test_runs/
+single_midi_manual_runs/
+split_midi_manual_runs/
+tmp_exports/
+tmp_exports_ui/
+tmp_single_midi/
+tmp_split_midi/
+web_manual_runs/
+web_manual_runs_1774089226/
+*.mid

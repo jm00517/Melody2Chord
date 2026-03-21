@@ -1,0 +1,66 @@
+﻿from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from .generator import generate_song
+from .models import GenerationRequest
+from .web import run_server
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="py2fl", description="Generate FL Studio friendly MIDI arrangements.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    generate_parser = subparsers.add_parser("generate", help="Generate a MIDI arrangement from text, melody, or both.")
+    generate_parser.add_argument("--text", help="Text prompt or lyrics.")
+    generate_parser.add_argument("--melody-midi", type=Path, help="Path to a melody MIDI file.")
+    generate_parser.add_argument("--tempo", type=int, help="Tempo override in BPM.")
+    generate_parser.add_argument("--key", help="Key override, for example C, F#, or A.")
+    generate_parser.add_argument("--genre", help="Genre hint, for example trap or rnb.")
+    generate_parser.add_argument("--bars", type=int, help="Number of bars to generate.")
+    generate_parser.add_argument("--seed", type=int, help="Random seed for reproducible output.")
+    generate_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory.")
+
+    serve_parser = subparsers.add_parser("serve", help="Run the local web UI.")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Default: 127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8765, help="Port to bind. Default: 8765")
+    serve_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory for generated files.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "generate":
+        if not args.text and not args.melody_midi:
+            parser.error("generate requires --text, --melody-midi, or both")
+        request = GenerationRequest(
+            text=args.text,
+            melody_midi_path=args.melody_midi,
+            tempo=args.tempo,
+            key=args.key,
+            genre=args.genre,
+            bars=args.bars,
+            seed=args.seed,
+            output_dir=args.out,
+        )
+        result = generate_song(request)
+        print(json.dumps({
+            "output_dir": str(result.output_dir),
+            "files": [str(path) for path in result.files],
+            "metadata": result.metadata,
+        }, indent=2))
+        return 0
+
+    if args.command == "serve":
+        run_server(host=args.host, port=args.port, output_dir=args.out)
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
