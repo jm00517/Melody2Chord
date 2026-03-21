@@ -583,35 +583,6 @@ exports/20260321_192054_dreamy_rnb_night_drive/option_01
 - `reroll_scope`
 - `preview_file`
 
-예시:
-
-```json
-{
-  "input_mode": "text+melody",
-  "tempo": 92,
-  "key": "C major",
-  "bars": 8,
-  "style_tags": ["dreamy", "rnb"],
-  "source_melody": "exports/.uploads/topline.mid",
-  "text": "dreamy rnb night drive",
-  "files": [
-    "melody.mid",
-    "chords.mid",
-    "bass.mid",
-    "drums.mid",
-    "full_arrangement.mid"
-  ],
-  "progression_label": "MeloMatch 1-4-6-5",
-  "progression_degrees": [1, 4, 6, 5],
-  "drum_pattern": "RNB Pocket",
-  "bass_pattern": "Hold",
-  "candidate_index": 1,
-  "candidate_seed": 123456,
-  "reroll_scope": "all",
-  "preview_file": "full_arrangement.mid"
-}
-```
-
 ### 11.5 `batch_meta.json`
 
 포함 필드:
@@ -642,31 +613,6 @@ exports/20260321_192054_dreamy_rnb_night_drive/option_01
 - `style_tags`
 - `preview_file`
 
-예시:
-
-```json
-{
-  "candidate_count": 4,
-  "selected_option": 2,
-  "selected_output_dir": "exports/20260321_192054_dreamy_rnb_night_drive/option_02",
-  "candidates": [
-    {
-      "candidate_index": 1,
-      "option_name": "option_01",
-      "output_dir": "exports/20260321_192054_dreamy_rnb_night_drive/option_01",
-      "progression_label": "Silk 1-4-6-5",
-      "candidate_seed": 1001,
-      "tempo": 88,
-      "key": "A minor",
-      "drum_pattern": "RNB Pocket",
-      "bass_pattern": "Hold",
-      "style_tags": ["dreamy", "rnb"],
-      "preview_file": "full_arrangement.mid"
-    }
-  ]
-}
-```
-
 ## 12. FL Studio에서 사용하는 방법
 
 권장 흐름:
@@ -677,17 +623,7 @@ exports/20260321_192054_dreamy_rnb_night_drive/option_01
 4. `full_arrangement.mid`로 전체 아이디어를 먼저 들어볼 수 있습니다.
 5. FL Studio 안에서 악기 할당, 보이싱 수정, 드럼 교체, 패턴 분할을 진행합니다.
 
-권장 역할:
-
-- `melody.mid`: 피아노롤 세부 편집용
-- `chords.mid`: 화성 수정용
-- `bass.mid`: 808 또는 베이스 레이어용
-- `drums.mid`: 리듬 재배치용
-- `full_arrangement.mid`: 빠른 청취용
-
 ## 13. Python API 사용
-
-CLI 외에도 직접 호출할 수 있습니다.
 
 ```python
 from pathlib import Path
@@ -714,34 +650,9 @@ batch = generate_candidates(
     ),
     count=4,
 )
-
-print(single.output_dir)
-print(batch[0].output_dir.parent)
 ```
 
-주요 타입:
-
-- `GenerationRequest`
-  - `text: str | None`
-  - `melody_midi_path: Path | None`
-  - `tempo: int | None`
-  - `key: str | None`
-  - `genre: str | None`
-  - `bars: int | None`
-  - `seed: int | None`
-  - `output_dir: Path`
-- `GenerationResult`
-  - `output_dir: Path`
-  - `files: list[Path]`
-  - `metadata: dict[str, object]`
-
 ## 14. 테스트 및 검증
-
-테스트 파일:
-
-- `tests/test_generate.py`
-
-포함 시나리오:
 
 - 텍스트 전용 생성
 - 멜로디 전용 생성
@@ -758,11 +669,6 @@ print(batch[0].output_dir.parent)
 ```powershell
 $env:PYTHONPATH='src'
 pytest -q
-```
-
-보조 검증:
-
-```powershell
 python -m compileall src
 ```
 
@@ -781,8 +687,6 @@ python -m compileall src
 - 드럼은 장르 스케치 수준입니다.
 - 업로드 파일은 `.uploads` 폴더에 남을 수 있습니다.
 
-즉, 이 도구는 `최종 자동 편곡기`라기보다 `FL Studio 작업 전 단계의 스케치 생성기`에 가깝습니다.
-
 ## 16. 향후 확장 포인트
 
 - 박 단위 또는 프레이즈 단위 코드 분석
@@ -797,38 +701,10 @@ python -m compileall src
 
 ## 17. 빠른 예시 모음
 
-텍스트만:
-
 ```bash
 py2fl generate --text "dark trap anthem" --bars 8 --seed 7 --out ./exports
-```
-
-멜로디만:
-
-```bash
 py2fl generate --melody-midi ./idea.mid --tempo 100 --out ./exports
-```
-
-텍스트 + 멜로디:
-
-```bash
 py2fl generate --text "dreamy rnb night drive" --melody-midi ./topline.mid --seed 3 --out ./exports
-```
-
-후보 4개 생성:
-
-```bash
 py2fl generate --text "dreamy rnb night drive" --count 4 --out ./exports
-```
-
-Web UI 실행:
-
-```bash
 py2fl serve --port 8765 --out ./exports
-```
-
-키와 장르 강제:
-
-```bash
-py2fl generate --text "club energy" --genre house --key "Db major" --bars 16 --out ./exports
 ```

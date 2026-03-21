@@ -240,7 +240,7 @@ class Py2FLWebApp:
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
           <input type="hidden" name="melody_source" value="{html.escape(state.get("melody_source", ""))}">
-          <p class="hint">텍스트와 MIDI 중 하나는 반드시 입력해야 합니다. 후보 생성 후 각 카드에서 full_arrangement.mid를 바로 들어볼 수 있습니다.</p>
+          <p class="hint">텍스트와 MIDI 중 하나는 반드시 입력해야 합니다. 후보 생성 후 각 카드에서 `full_arrangement.mid`를 바로 들어볼 수 있습니다.</p>
           <button type="submit">Generate Options</button>
         </form>
       </section>
@@ -265,12 +265,13 @@ class Py2FLWebApp:
     let currentButtons = null;
     let currentStop = null;
     const synthRegistry = new Map();
+    const masterGain = new Tone.Gain(0.2).toDestination();
 
     function makeSynthForTrack(name) {{
-      if (name === 'Drums') return new Tone.MembraneSynth().toDestination();
-      if (name === 'Bass') return new Tone.MonoSynth({{ oscillator: {{ type: 'square' }}, envelope: {{ attack: 0.01, release: 0.2 }} }}).toDestination();
-      if (name === 'Chords') return new Tone.PolySynth(Tone.Synth, {{ oscillator: {{ type: 'triangle' }}, envelope: {{ attack: 0.02, release: 0.3 }} }}).toDestination();
-      return new Tone.PolySynth(Tone.Synth, {{ oscillator: {{ type: 'sine' }}, envelope: {{ attack: 0.01, release: 0.2 }} }}).toDestination();
+      if (name === 'Drums') return new Tone.MembraneSynth().connect(masterGain);
+      if (name === 'Bass') return new Tone.MonoSynth({{ oscillator: {{ type: 'square' }}, envelope: {{ attack: 0.01, release: 0.2 }}, volume: -14 }}).connect(masterGain);
+      if (name === 'Chords') return new Tone.PolySynth(Tone.Synth, {{ oscillator: {{ type: 'triangle' }}, envelope: {{ attack: 0.02, release: 0.3 }}, volume: -18 }}).connect(masterGain);
+      return new Tone.PolySynth(Tone.Synth, {{ oscillator: {{ type: 'sine' }}, envelope: {{ attack: 0.01, release: 0.2 }}, volume: -16 }}).connect(masterGain);
     }}
 
     async function stopPlayback() {{
@@ -311,7 +312,7 @@ class Py2FLWebApp:
         track.notes.forEach((note) => {{
           lastTime = Math.max(lastTime, note.time + note.duration);
           Tone.Transport.schedule((time) => {{
-            synth.triggerAttackRelease(note.name, note.duration, time, Math.max(0.2, note.velocity || 0.7));
+            synth.triggerAttackRelease(note.name, note.duration, time, Math.max(0.08, (note.velocity || 0.7) * 0.35));
           }}, note.time);
         }});
       }});
