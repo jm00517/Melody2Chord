@@ -708,3 +708,17 @@ py2fl generate --text "dreamy rnb night drive" --melody-midi ./topline.mid --see
 py2fl generate --text "dreamy rnb night drive" --count 4 --out ./exports
 py2fl serve --port 8765 --out ./exports
 ```
+
+- Web UI ?????? `Preview Volume` ????? ???, ?? ?????? ??? ?????.
+
+## Latest Web Preview Updates
+
+- Added a global `Preview Volume` slider for browser playback.
+- Added session-scoped part mute buttons for `Melody`, `Chords`, `Bass`, and `Drums`.
+- Mute and volume settings apply only to the current page session and reset on refresh.
+
+## Latest Harmony Updates
+
+- Melody-driven chord generation now uses progression-aware scoring instead of simple per-bar triad matching.
+- Chord candidates can include `7th`, `add9`, `sus2`, and `sus4` voicings.
+- Browser candidate previews should now expose more harmonic variation when melody input is provided.

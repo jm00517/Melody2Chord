@@ -1,8 +1,9 @@
-import io
+﻿import io
 import json
 from pathlib import Path
 
 from py2fl.generator import BATCH_META_FILENAME, generate_candidates, generate_song, load_batch_meta
+from py2fl.melody import analyze_melody_file
 from py2fl.midi import parse_midi_notes, write_midi
 from py2fl.models import BAR_TICKS, GenerationRequest, NoteEvent, TrackData
 from py2fl.web import Py2FLWebApp
@@ -70,6 +71,42 @@ def test_generate_from_non_480_ppq_melody_keeps_timing(tmp_path: Path) -> None:
     ]
 
 
+def test_melody_analysis_aligns_offset_to_zero(tmp_path: Path) -> None:
+    melody_path = tmp_path / "pickup.mid"
+    input_notes = [
+        NoteEvent(pitch=67, start=BAR_TICKS // 2, duration=BAR_TICKS // 4),
+        NoteEvent(pitch=69, start=BAR_TICKS, duration=BAR_TICKS // 4),
+    ]
+    write_midi(melody_path, [TrackData(name="Pickup", notes=input_notes)], tempo_bpm=110)
+
+    analysis = analyze_melody_file(melody_path)
+
+    assert analysis.source_start_offset_ticks == BAR_TICKS // 2
+    assert analysis.notes[0].start == 0
+    assert analysis.notes[1].start == BAR_TICKS // 2
+
+
+def test_generate_from_offset_melody_aligns_output_and_meta(tmp_path: Path) -> None:
+    melody_path = tmp_path / "offset_input.mid"
+    input_notes = [
+        NoteEvent(pitch=67, start=BAR_TICKS // 2, duration=BAR_TICKS // 4),
+        NoteEvent(pitch=71, start=BAR_TICKS, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=72, start=BAR_TICKS + BAR_TICKS // 2, duration=BAR_TICKS // 4),
+    ]
+    write_midi(melody_path, [TrackData(name="Pickup", notes=input_notes)], tempo_bpm=98)
+
+    result = generate_song(GenerationRequest(melody_midi_path=melody_path, output_dir=tmp_path))
+    parsed_tracks, _ = parse_midi_notes(result.output_dir / "melody.mid")
+    melodic_track = next(track for track in parsed_tracks if track.notes)
+    chord_tracks, _ = parse_midi_notes(result.output_dir / "chords.mid")
+    chord_track = next(track for track in chord_tracks if track.notes)
+
+    assert melodic_track.notes[0].start == 0
+    assert chord_track.notes[0].start == 0
+    assert result.metadata["source_start_offset_ticks"] == BAR_TICKS // 2
+    assert result.metadata["melody_aligned_to_start"] is True
+
+
 def test_generate_from_text_and_melody(tmp_path: Path) -> None:
     melody_path = tmp_path / "hybrid.mid"
     input_notes = [
@@ -92,6 +129,32 @@ def test_generate_from_text_and_melody(tmp_path: Path) -> None:
     assert "rnb" in result.metadata["style_tags"]
 
 
+def test_generate_from_melody_adds_chord_variation(tmp_path: Path) -> None:
+    melody_path = tmp_path / "variation.mid"
+    input_notes = [
+        NoteEvent(pitch=64, start=0, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=67, start=BAR_TICKS // 2, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=71, start=BAR_TICKS, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=69, start=BAR_TICKS + BAR_TICKS // 2, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=72, start=BAR_TICKS * 2, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=74, start=BAR_TICKS * 2 + BAR_TICKS // 2, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=76, start=BAR_TICKS * 3, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=79, start=BAR_TICKS * 3 + BAR_TICKS // 2, duration=BAR_TICKS // 2),
+    ]
+    write_midi(melody_path, [TrackData(name="Topline", notes=input_notes)], tempo_bpm=96)
+
+    result = generate_song(GenerationRequest(melody_midi_path=melody_path, seed=12, output_dir=tmp_path))
+    parsed_tracks, _ = parse_midi_notes(result.output_dir / "chords.mid")
+    chord_track = next(track for track in parsed_tracks if track.notes)
+    notes_per_bar = {}
+    for note in chord_track.notes:
+        notes_per_bar.setdefault(note.start // BAR_TICKS, 0)
+        notes_per_bar[note.start // BAR_TICKS] += 1
+
+    assert any(count > 3 for count in notes_per_bar.values())
+    assert "MeloFlow" in result.metadata["progression_label"]
+
+
 def test_web_app_renders_home(tmp_path: Path) -> None:
     app = Py2FLWebApp(output_dir=tmp_path)
     captured = {}
@@ -110,7 +173,9 @@ def test_web_app_renders_home(tmp_path: Path) -> None:
 
     assert captured["status"] == "200 OK"
     assert "Generate Options" in body
-    assert "Create Candidate Set" in body
+    assert "Preview Volume" in body
+    assert "Mute Melody" in body
+    assert "Mute Chords" in body
 
 
 def test_web_select_persists_batch_choice(tmp_path: Path) -> None:

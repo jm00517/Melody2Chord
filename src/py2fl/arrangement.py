@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+from dataclasses import dataclass
+from collections import Counter
 import random
 
 from .models import Arrangement, BAR_TICKS, MelodyAnalysis, NoteEvent, TextFeatures
@@ -83,6 +85,26 @@ BASS_VARIANTS = {
     "pop": ["hold", "pulse", "octave"],
 }
 
+TRANSITION_WEIGHTS: dict[tuple[int, int], float] = {}
+for progressions in PROGRESSION_LIBRARY.values():
+    for _, degrees in progressions:
+        for current, nxt in zip(degrees, degrees[1:] + degrees[:1]):
+            TRANSITION_WEIGHTS[(current, nxt)] = TRANSITION_WEIGHTS.get((current, nxt), 0.0) + 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class ChordOption:
+    degree: int
+    label: str
+    pitch_classes: tuple[int, ...]
+    root_pc: int
+
+
+@dataclass(frozen=True, slots=True)
+class HarmonyProfile:
+    degree_bias: dict[int, float]
+    flavor_bias: dict[str, float]
+
 
 def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None, tempo: int | None, key: str | None, bars: int | None, seed: int | None) -> Arrangement:
     randomizer = random.Random(seed)
@@ -97,7 +119,7 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
         chords, progression_degrees, progression_label = _generate_chords_for_melody(resolved_key, resolved_mode, melody, resolved_bars, randomizer)
     else:
         progression_label, progression_degrees = _pick_progression_variant(resolved_mode, text_features, randomizer)
-        chords = _generate_progression_chords(resolved_key, resolved_mode, resolved_bars, progression_degrees)
+        chords = _generate_progression_chords(resolved_key, resolved_mode, resolved_bars, progression_degrees, randomizer)
         melody = _generate_topline(resolved_key, resolved_mode, chords, resolved_bars, randomizer)
 
     bass, bass_pattern = _generate_bassline(chords, text_features, randomizer)
@@ -148,63 +170,221 @@ def _pick_progression_variant(mode: str, text_features: TextFeatures | None, ran
     return label, degrees
 
 
-def _generate_progression_chords(key: str, mode: str, bars: int, progression: list[int]) -> list[NoteEvent]:
+def _generate_progression_chords(key: str, mode: str, bars: int, progression: list[int], randomizer: random.Random) -> list[NoteEvent]:
     notes: list[NoteEvent] = []
     for bar in range(bars):
         degree = progression[bar % len(progression)]
-        notes.extend(_bar_chord_notes(key, mode, degree, bar * BAR_TICKS))
+        option = _pick_text_chord_option(key, mode, degree, bar, bars, randomizer)
+        notes.extend(_bar_chord_notes(option, bar * BAR_TICKS))
     return notes
 
 
-def _bar_chord_notes(key: str, mode: str, degree: int, start_tick: int) -> list[NoteEvent]:
-    root_pc = degree_pitch_class(key, mode, degree)
-    third_pc = degree_pitch_class(key, mode, degree + 2)
-    fifth_pc = degree_pitch_class(key, mode, degree + 4)
-    return [
-        NoteEvent(pitch=midi_for_pitch_class(root_pc, 4), start=start_tick, duration=BAR_TICKS, velocity=72, channel=1),
-        NoteEvent(pitch=midi_for_pitch_class(third_pc, 4), start=start_tick, duration=BAR_TICKS, velocity=68, channel=1),
-        NoteEvent(pitch=midi_for_pitch_class(fifth_pc, 4), start=start_tick, duration=BAR_TICKS, velocity=68, channel=1),
-    ]
-
-
 def _generate_chords_for_melody(key: str, mode: str, melody: list[NoteEvent], bars: int, randomizer: random.Random) -> tuple[list[NoteEvent], list[int], str]:
+    scale = scale_for(key, mode)
+    profile = _build_harmony_profile(randomizer)
+    bar_options = [_build_degree_options(scale, degree) for degree in range(1, 8)]
+    choices = [option for options in bar_options for option in options]
+    states: list[dict[int, tuple[float, int | None]]] = []
+
+    for bar in range(bars):
+        bar_notes = _notes_for_bar(melody, bar)
+        current_scores: dict[int, tuple[float, int | None]] = {}
+        for option_index, option in enumerate(choices):
+            base_score = _score_chord_option(bar_notes, option, bar, bars, profile)
+            if bar == 0:
+                current_scores[option_index] = (base_score, None)
+                continue
+            best_previous: tuple[float, int] | None = None
+            for previous_index, (previous_score, _) in states[bar - 1].items():
+                previous_option = choices[previous_index]
+                total_score = previous_score + base_score + _transition_bonus(previous_option, option, bar, bars, profile)
+                if best_previous is None or total_score > best_previous[0]:
+                    best_previous = (total_score, previous_index)
+            if best_previous is not None:
+                current_scores[option_index] = best_previous
+        states.append(current_scores)
+
+    final_scores = states[-1]
+    ranked = sorted(final_scores.items(), key=lambda item: item[1][0], reverse=True)
+    top_choices = [option_index for option_index, _ in ranked[: min(3, len(ranked))]]
+    best_option_index = randomizer.choice(top_choices)
+
+    selected_indices: list[int] = []
+    for bar in range(bars - 1, -1, -1):
+        selected_indices.append(best_option_index)
+        _, previous_index = states[bar][best_option_index]
+        if previous_index is None:
+            break
+        best_option_index = previous_index
+    selected_indices.reverse()
+
+    selected_options = [choices[index] for index in selected_indices]
     notes: list[NoteEvent] = []
     degrees: list[int] = []
-    scale = scale_for(key, mode)
-    triads = [(scale[index], scale[(index + 2) % 7], scale[(index + 4) % 7]) for index in range(7)]
-    for bar in range(bars):
-        bar_start = bar * BAR_TICKS
-        bar_end = bar_start + BAR_TICKS
-        bar_notes = [note for note in melody if note.start < bar_end and note.end > bar_start]
-        degree_index = _best_matching_triad(bar_notes, triads, randomizer)
-        degree = degree_index + 1
-        degrees.append(degree)
-        root_pc, third_pc, fifth_pc = triads[degree_index]
-        notes.extend([
-            NoteEvent(pitch=midi_for_pitch_class(root_pc, 4), start=bar_start, duration=BAR_TICKS, velocity=72, channel=1),
-            NoteEvent(pitch=midi_for_pitch_class(third_pc, 4), start=bar_start, duration=BAR_TICKS, velocity=68, channel=1),
-            NoteEvent(pitch=midi_for_pitch_class(fifth_pc, 4), start=bar_start, duration=BAR_TICKS, velocity=68, channel=1),
-        ])
-    label = "MeloMatch " + "-".join(str(value) for value in degrees[: min(4, len(degrees))])
+    flavors: list[str] = []
+    for bar, option in enumerate(selected_options):
+        notes.extend(_bar_chord_notes(option, bar * BAR_TICKS))
+        degrees.append(option.degree)
+        flavors.append(option.label)
+
+    label = "MeloFlow " + "-".join(str(value) for value in degrees[: min(4, len(degrees))])
+    if flavors:
+        dominant_flavors = [name for name, _ in Counter(flavors).most_common(3)]
+        label += " | " + ", ".join(dominant_flavors)
     return notes, degrees, label
 
 
-def _best_matching_triad(bar_notes: list[NoteEvent], triads: list[tuple[int, int, int]], randomizer: random.Random) -> int:
+def _pick_text_chord_option(key: str, mode: str, degree: int, bar: int, bars: int, randomizer: random.Random) -> ChordOption:
+    scale = scale_for(key, mode)
+    options = _build_degree_options(scale, degree)
+    weighted: list[tuple[ChordOption, float]] = []
+    for option in options:
+        weight = 1.0
+        if option.label == "triad":
+            weight = 1.8
+        elif option.label == "7th":
+            weight = 1.6
+        elif option.label == "add9":
+            weight = 1.4
+        else:
+            weight = 0.9
+        if bar == bars - 1 and option.degree == 1 and option.label in {"triad", "7th"}:
+            weight += 1.2
+        weighted.append((option, weight))
+    return randomizer.choices([item[0] for item in weighted], weights=[item[1] for item in weighted], k=1)[0]
+
+
+def _build_degree_options(scale: list[int], degree: int) -> list[ChordOption]:
+    index = (degree - 1) % 7
+    root_pc = scale[index]
+    second_pc = scale[(index + 1) % 7]
+    third_pc = scale[(index + 2) % 7]
+    fourth_pc = scale[(index + 3) % 7]
+    fifth_pc = scale[(index + 4) % 7]
+    seventh_pc = scale[(index + 6) % 7]
+
+    triad = (root_pc, third_pc, fifth_pc)
+    options = [
+        ChordOption(degree=degree, label="triad", pitch_classes=triad, root_pc=root_pc),
+        ChordOption(degree=degree, label="7th", pitch_classes=(root_pc, third_pc, fifth_pc, seventh_pc), root_pc=root_pc),
+        ChordOption(degree=degree, label="add9", pitch_classes=(root_pc, third_pc, fifth_pc, second_pc), root_pc=root_pc),
+    ]
+
+    diminished = ((third_pc - root_pc) % 12 == 3) and ((fifth_pc - third_pc) % 12 == 3)
+    if not diminished:
+        options.append(ChordOption(degree=degree, label="sus2", pitch_classes=(root_pc, second_pc, fifth_pc), root_pc=root_pc))
+        options.append(ChordOption(degree=degree, label="sus4", pitch_classes=(root_pc, fourth_pc, fifth_pc), root_pc=root_pc))
+    return options
+
+
+def _score_chord_option(bar_notes: list[NoteEvent], option: ChordOption, bar: int, bars: int, profile: HarmonyProfile) -> float:
     if not bar_notes:
-        return randomizer.randrange(len(triads))
-    scores: list[tuple[int, int]] = []
-    pitch_classes = [note.pitch % 12 for note in bar_notes]
-    for index, triad in enumerate(triads):
-        score = 0
-        for pitch_class in pitch_classes:
-            score += 3 if pitch_class in triad else -2
-        strong_note = max(bar_notes, key=lambda note: (note.duration, -note.start))
-        if strong_note.pitch % 12 == triad[0]:
-            score += 2
-        scores.append((score, index))
-    best_score = max(score for score, _ in scores)
-    candidates = [index for score, index in scores if score >= best_score - 2]
-    return randomizer.choice(candidates)
+        score = 1.0 + profile.degree_bias.get(option.degree, 0.0) + profile.flavor_bias.get(option.label, 0.0)
+        if option.label == "7th":
+            score += 0.4
+        elif option.label == "add9":
+            score += 0.25
+        return score
+
+    score = 0.0
+    pitch_classes = set(option.pitch_classes)
+    for note in bar_notes:
+        weight = max(1.0, note.duration / (BAR_TICKS / 4))
+        pitch_class = note.pitch % 12
+        if pitch_class in pitch_classes:
+            score += 2.4 * weight
+        else:
+            score -= 1.8 * weight
+
+    strong_note = max(bar_notes, key=lambda note: (note.duration, -note.start))
+    strong_pc = strong_note.pitch % 12
+    if strong_pc == option.root_pc:
+        score += 3.0
+    elif strong_pc in pitch_classes:
+        score += 1.8
+
+    if option.label == "7th":
+        score += 0.8
+        if strong_pc == option.pitch_classes[-1]:
+            score += 0.9
+    elif option.label == "add9":
+        score += 0.7
+        if strong_pc == option.pitch_classes[-1]:
+            score += 0.8
+    elif option.label in {"sus2", "sus4"}:
+        score += 0.2
+        third_pc = option.pitch_classes[1] if option.label == "sus2" else option.pitch_classes[1]
+        if strong_pc == third_pc:
+            score -= 1.2
+
+    score += profile.degree_bias.get(option.degree, 0.0)
+    score += profile.flavor_bias.get(option.label, 0.0)
+    if (bar + 1) % 4 == 0 and option.degree in {1, 5, 6}:
+        score += 1.2
+    if bar == bars - 1 and option.degree in {1, 6}:
+        score += 1.6
+    return score
+
+
+def _transition_bonus(previous: ChordOption, current: ChordOption, bar: int, bars: int, profile: HarmonyProfile) -> float:
+    score = TRANSITION_WEIGHTS.get((previous.degree, current.degree), 0.0) * 0.7
+    if previous.degree == current.degree:
+        score -= 0.9
+    if previous.label == current.label and current.label in {"sus2", "sus4"}:
+        score -= 0.4
+    if current.label == "7th":
+        score += 0.15
+    elif current.label == "add9":
+        score += 0.1
+    score += profile.degree_bias.get(current.degree, 0.0) * 0.35
+    score += profile.flavor_bias.get(current.label, 0.0) * 0.5
+    if (bar + 1) % 4 == 0 and current.degree in {1, 5, 6}:
+        score += 0.7
+    if bar == bars - 1 and current.degree == 1:
+        score += 1.0
+    return score
+
+
+def _build_harmony_profile(randomizer: random.Random) -> HarmonyProfile:
+    degree_bias = {degree: randomizer.uniform(-1.0, 1.0) for degree in range(1, 8)}
+    flavor_bias = {label: randomizer.uniform(-0.7, 0.7) for label in ("triad", "7th", "add9", "sus2", "sus4")}
+    favored_degree = randomizer.choice([1, 4, 5, 6])
+    degree_bias[favored_degree] += 0.8
+    flavor_bias[randomizer.choice(["7th", "add9", "sus2", "sus4"])] += 0.6
+    return HarmonyProfile(degree_bias=degree_bias, flavor_bias=flavor_bias)
+
+
+def _bar_chord_notes(option: ChordOption, start_tick: int) -> list[NoteEvent]:
+    pitches = _voice_option(option)
+    velocities = [72, 68, 68, 64, 62]
+    return [
+        NoteEvent(pitch=pitch, start=start_tick, duration=BAR_TICKS, velocity=velocities[min(index, len(velocities) - 1)], channel=1)
+        for index, pitch in enumerate(pitches)
+    ]
+
+
+def _voice_option(option: ChordOption) -> list[int]:
+    root_pitch = midi_for_pitch_class(option.root_pc, 4)
+    pitches = [root_pitch]
+    reference = root_pitch + 1
+    for pitch_class in option.pitch_classes[1:]:
+        pitch = _pitch_at_or_above(pitch_class, reference)
+        pitches.append(clamp_pitch(pitch, 48, 84))
+        reference = pitch + 1
+    return pitches
+
+
+def _pitch_at_or_above(pitch_class: int, minimum_pitch: int) -> int:
+    pitch = midi_for_pitch_class(pitch_class, 3)
+    while pitch < minimum_pitch:
+        pitch += 12
+    return pitch
+
+
+def _notes_for_bar(notes: list[NoteEvent], bar: int) -> list[NoteEvent]:
+    bar_start = bar * BAR_TICKS
+    bar_end = bar_start + BAR_TICKS
+    return [note for note in notes if note.start < bar_end and note.end > bar_start]
 
 
 def _generate_topline(key: str, mode: str, chords: list[NoteEvent], bars: int, randomizer: random.Random) -> list[NoteEvent]:
@@ -217,8 +397,8 @@ def _generate_topline(key: str, mode: str, chords: list[NoteEvent], bars: int, r
     ]
     chosen_rhythm = randomizer.choice(rhythms)
     for bar in range(bars):
-        bar_chord = chords[bar * 3:(bar + 1) * 3]
-        chord_tones = [note.pitch % 12 for note in bar_chord]
+        bar_chord = _notes_for_bar(chords, bar)
+        chord_tones = [note.pitch % 12 for note in bar_chord] or scale[:3]
         last_pitch = notes[-1].pitch if notes else midi_for_pitch_class(scale[0], 5)
         for index, offset in enumerate(chosen_rhythm):
             pitch_class = chord_tones[index % len(chord_tones)] if index % 2 == 0 else randomizer.choice(scale)
@@ -250,10 +430,12 @@ def _generate_bassline(chords: list[NoteEvent], text_features: TextFeatures | No
     genre = text_features.genre if text_features else "pop"
     pattern = randomizer.choice(BASS_VARIANTS.get(genre, ["hold"]))
     bass: list[NoteEvent] = []
-    for bar_index in range(0, len(chords), 3):
-        chord_root = chords[bar_index]
-        bar = chord_root.start // BAR_TICKS
-        root_pitch = clamp_pitch(chord_root.pitch - 24, 28, 52)
+    max_bar = max((note.start for note in chords), default=0) // BAR_TICKS + 1
+    for bar in range(max_bar):
+        bar_chord = _notes_for_bar(chords, bar)
+        if not bar_chord:
+            continue
+        root_pitch = clamp_pitch(min(bar_chord, key=lambda note: note.pitch).pitch - 24, 28, 52)
         if pattern == "staccato":
             for step in range(4):
                 bass.append(NoteEvent(pitch=root_pitch, start=bar * BAR_TICKS + step * (BAR_TICKS // 4), duration=BAR_TICKS // 8, velocity=88, channel=2))

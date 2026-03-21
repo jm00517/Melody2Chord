@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import cgi
 import html
@@ -14,6 +14,7 @@ from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta
 from .models import GenerationRequest
 
 TITLE = "py2fl Studio"
+TRACK_NAMES = ("Melody", "Chords", "Bass", "Drums")
 
 
 class Py2FLWebApp:
@@ -64,7 +65,7 @@ class Py2FLWebApp:
         melody_path = _resolve_melody_path(form, upload_root)
 
         if not text and melody_path is None:
-            raise ValueError("텍스트 또는 멜로디 MIDI 중 하나는 입력해야 합니다.")
+            raise ValueError("Enter text, a melody MIDI file, or both.")
 
         request = GenerationRequest(
             text=text,
@@ -150,8 +151,13 @@ class Py2FLWebApp:
             """
             candidate_cards = '<section class="candidate-grid">' + ''.join(_candidate_card(result, index, batch_meta) for index, result in enumerate(candidates, start=1)) + '</section>'
 
+        mute_controls = ''.join(
+            f'<button type="button" class="ghost mute-toggle" data-track-toggle="{track_name}" aria-pressed="false">Mute {track_name}</button>'
+            for track_name in TRACK_NAMES
+        )
+
         return f"""<!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -176,7 +182,7 @@ class Py2FLWebApp:
     .eyebrow {{ letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-dark); font-size: 12px; }}
     h1 {{ margin: 0; font-size: clamp(36px, 7vw, 82px); line-height: 0.95; max-width: 10ch; }}
     .lead {{ max-width: 62ch; color: var(--muted); font-size: 18px; line-height: 1.6; }}
-    .layout {{ display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr); gap: 24px; align-items: start; }}
+    .layout {{ display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr); gap: 24px; align-items: start; }}
     .panel {{ background: var(--surface); backdrop-filter: blur(10px); border: 1px solid var(--line); border-radius: 26px; padding: 22px; box-shadow: var(--shadow); }}
     .panel h2 {{ margin-top: 0; font-size: 22px; }}
     form {{ display: grid; gap: 16px; }}
@@ -209,7 +215,15 @@ class Py2FLWebApp:
     .files {{ padding-left: 20px; margin: 0 0 14px; }}
     .card-actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
     .card-actions form {{ display: block; }}
-    @media (max-width: 900px) {{ .layout {{ grid-template-columns: 1fr; }} .grid {{ grid-template-columns: 1fr; }} }}
+    .session-controls {{ display: grid; gap: 16px; margin-bottom: 18px; }}
+    .control-block {{ display: grid; gap: 8px; }}
+    .volume-row {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
+    .volume-label {{ font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }}
+    .volume-value {{ font-size: 14px; color: var(--accent-dark); font-weight: 700; min-width: 52px; text-align: right; }}
+    .volume-slider {{ width: 100%; accent-color: var(--accent); }}
+    .mute-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+    .mute-toggle.active {{ background: linear-gradient(135deg, #6b5840, #9b866c); color: white; }}
+    @media (max-width: 900px) {{ .layout {{ grid-template-columns: 1fr; }} .grid {{ grid-template-columns: 1fr; }} .mute-grid {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
@@ -217,40 +231,53 @@ class Py2FLWebApp:
     <header class="hero">
       <div class="eyebrow">FL Studio MIDI Generator</div>
       <h1>Generate. Compare. Listen. Choose.</h1>
-      <p class="lead">같은 입력에서 여러 진행 샘플을 만들고, 웹에서 전체 미리듣기를 재생한 뒤 원하는 후보를 선택할 수 있습니다.</p>
+      <p class="lead">Create multiple arrangements from the same idea, audition them in the browser, mute parts, and keep the candidate you want.</p>
     </header>
     <section class="layout">
       <section class="panel">
         <h2>Create Candidate Set</h2>
         <form method="post" action="/generate" enctype="multipart/form-data">
           <label>
-            텍스트 또는 가사
-            <textarea name="text" placeholder="예: dreamy rnb night drive with airy chords">{html.escape(state.get("text", ""))}</textarea>
+            Text Prompt or Lyrics
+            <textarea name="text" placeholder="Example: dreamy rnb night drive with airy chords">{html.escape(state.get("text", ""))}</textarea>
           </label>
           <label>
-            멜로디 MIDI 업로드
+            Melody MIDI Upload
             <input type="file" name="melody_midi" accept=".mid,.midi">
           </label>
           <div class="grid">
             <label>Tempo<input type="number" name="tempo" min="30" max="300" placeholder="auto" value="{html.escape(state.get("tempo", ""))}"></label>
-            <label>Key<input type="text" name="key" placeholder="예: F#, A minor" value="{html.escape(state.get("key", ""))}"></label>
-            <label>Genre<input type="text" name="genre" placeholder="예: trap, rnb, house" value="{html.escape(state.get("genre", ""))}"></label>
+            <label>Key<input type="text" name="key" placeholder="Example: F#, A minor" value="{html.escape(state.get("key", ""))}"></label>
+            <label>Genre<input type="text" name="genre" placeholder="Example: trap, rnb, house" value="{html.escape(state.get("genre", ""))}"></label>
             <label>Bars<input type="number" name="bars" min="1" max="128" placeholder="auto" value="{html.escape(state.get("bars", ""))}"></label>
             <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
           <input type="hidden" name="melody_source" value="{html.escape(state.get("melody_source", ""))}">
-          <p class="hint">텍스트와 MIDI 중 하나는 반드시 입력해야 합니다. 후보 생성 후 각 카드에서 `full_arrangement.mid`를 바로 들어볼 수 있습니다.</p>
+          <p class="hint">Enter text, a melody MIDI file, or both. After generation, you can preview `full_arrangement.mid`, adjust preview volume, and mute individual parts.</p>
           <button type="submit">Generate Options</button>
         </form>
       </section>
       <aside class="panel">
-        <h2>How It Works</h2>
+        <h2>Session Controls</h2>
+        <div class="session-controls">
+          <div class="control-block">
+            <div class="volume-row">
+              <span class="volume-label">Preview Volume</span>
+              <span class="volume-value" id="volume-value">20%</span>
+            </div>
+            <input class="volume-slider" id="volume-slider" type="range" min="0" max="100" value="20">
+          </div>
+          <div class="control-block">
+            <div class="volume-label">Part Mutes</div>
+            <div class="mute-grid">{mute_controls}</div>
+          </div>
+        </div>
         <div class="specs">
-          <div class="spec"><strong>후보 생성</strong>한 번에 1~8개의 샘플을 생성합니다. 각 후보는 자체 progression, drum, bass 패턴을 가집니다.</div>
-          <div class="spec"><strong>브라우저 재생</strong>각 후보의 <code>full_arrangement.mid</code>를 브라우저 내 MIDI 플레이어로 미리듣기 재생합니다.</div>
-          <div class="spec"><strong>선택 저장</strong><code>Select This</code>를 누르면 배치 폴더의 <code>{BATCH_META_FILENAME}</code>에 선택된 후보 번호가 저장됩니다.</div>
-          <div class="spec"><strong>저장 위치</strong>{html.escape(str(self.output_dir))} 아래 배치 폴더와 <code>option_01</code>, <code>option_02</code> 식의 후보 폴더를 생성합니다.</div>
+          <div class="spec"><strong>Candidate generation</strong>Create 1 to 8 arrangement options in one pass. Each option can differ in progression, chord color, bass pattern, and drums.</div>
+          <div class="spec"><strong>Browser playback</strong>Each candidate previews its `full_arrangement.mid` file directly in the browser with a lightweight synth setup.</div>
+          <div class="spec"><strong>Saved selection</strong>`Select This` stores the chosen option in <code>{BATCH_META_FILENAME}</code> inside the batch folder.</div>
+          <div class="spec"><strong>Output root</strong>Files are written under {html.escape(str(self.output_dir))}, with batch folders and `option_01`, `option_02` style candidate directories.</div>
         </div>
       </aside>
     </section>
@@ -262,10 +289,42 @@ class Py2FLWebApp:
     import * as Tone from 'https://cdn.jsdelivr.net/npm/tone@15.0.4/+esm';
     import {{ Midi }} from 'https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/+esm';
 
+    const TRACK_NAMES = ['Melody', 'Chords', 'Bass', 'Drums'];
     let currentButtons = null;
     let currentStop = null;
     const synthRegistry = new Map();
-    const masterGain = new Tone.Gain(0.2).toDestination();
+    const mutedTracks = new Set();
+    const DEFAULT_VOLUME = 20;
+    const volumeSlider = document.getElementById('volume-slider');
+    const volumeValue = document.getElementById('volume-value');
+    const masterGain = new Tone.Gain(DEFAULT_VOLUME / 100).toDestination();
+
+    function setPreviewVolume(value) {{
+      const normalized = Math.max(0, Math.min(100, Number(value) || 0));
+      masterGain.gain.value = normalized / 100;
+      if (volumeSlider) volumeSlider.value = String(normalized);
+      if (volumeValue) volumeValue.textContent = `${{normalized}}%`;
+    }}
+
+    function setTrackMuted(trackName, muted) {{
+      if (muted) {{
+        mutedTracks.add(trackName);
+      }} else {{
+        mutedTracks.delete(trackName);
+      }}
+      const synth = synthRegistry.get(trackName);
+      if (muted) {{
+        synth?.releaseAll?.();
+      }}
+      document.querySelectorAll(`[data-track-toggle="${{trackName}}"]`).forEach((button) => {{
+        button.classList.toggle('active', muted);
+        button.setAttribute('aria-pressed', muted ? 'true' : 'false');
+        button.textContent = `${{muted ? 'Unmute' : 'Mute'}} ${{trackName}}`;
+      }});
+    }}
+
+    setPreviewVolume(DEFAULT_VOLUME);
+    TRACK_NAMES.forEach((trackName) => setTrackMuted(trackName, false));
 
     function makeSynthForTrack(name) {{
       if (name === 'Drums') return new Tone.MembraneSynth().connect(masterGain);
@@ -312,6 +371,7 @@ class Py2FLWebApp:
         track.notes.forEach((note) => {{
           lastTime = Math.max(lastTime, note.time + note.duration);
           Tone.Transport.schedule((time) => {{
+            if (mutedTracks.has(name)) return;
             synth.triggerAttackRelease(note.name, note.duration, time, Math.max(0.08, (note.velocity || 0.7) * 0.35));
           }}, note.time);
         }});
@@ -332,6 +392,19 @@ class Py2FLWebApp:
         }}
       }}, Math.ceil((lastTime + 0.5) * 1000));
     }}
+
+    if (volumeSlider) {{
+      volumeSlider.addEventListener('input', (event) => {{
+        setPreviewVolume(event.target.value);
+      }});
+    }}
+
+    document.querySelectorAll('[data-track-toggle]').forEach((button) => {{
+      button.addEventListener('click', () => {{
+        const trackName = button.dataset.trackToggle;
+        setTrackMuted(trackName, !mutedTracks.has(trackName));
+      }});
+    }});
 
     document.querySelectorAll('[data-preview-url]').forEach((button) => {{
       button.addEventListener('click', async () => {{
@@ -398,7 +471,7 @@ def _candidate_card(result, index: int, batch_meta: dict[str, object] | None) ->
       <div class="meta">
         <div><strong>Seed</strong> {html.escape(str(meta.get('candidate_seed')))}</div>
         <div><strong>Tempo</strong> {html.escape(str(meta.get('tempo')))} BPM</div>
-        <div><strong>Key</strong> {html.escape(str(meta.get('key')))}</div>
+        <div><strong>Key</strong> {html.escape(str(meta.get('key')))} </div>
         <div><strong>Drums</strong> {html.escape(str(meta.get('drum_pattern')))}</div>
         <div><strong>Bass</strong> {html.escape(str(meta.get('bass_pattern')))}</div>
       </div>

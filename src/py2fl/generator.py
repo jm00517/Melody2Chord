@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +27,15 @@ def generate_song(request: GenerationRequest) -> GenerationResult:
         seed=request.seed,
     )
     run_dir = _build_output_dir(request.output_dir, request.text, request.melody_midi_path)
-    return _write_arrangement(run_dir, arrangement, request, candidate_index=1, candidate_seed=request.seed, reroll_scope="all")
+    return _write_arrangement(
+        run_dir,
+        arrangement,
+        request,
+        melody_analysis=context["melody_analysis"],
+        candidate_index=1,
+        candidate_seed=request.seed,
+        reroll_scope="all",
+    )
 
 
 def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope: str = "all", seed_offset: int = 0) -> list[GenerationResult]:
@@ -57,16 +65,29 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
         )
 
     results: list[GenerationResult] = []
+    seen_signatures: set[tuple[tuple[int, ...], str]] = set()
     for index in range(count):
         candidate_seed = base_seed + index * 101 + (5000 if reroll_scope == "chords" else 0)
-        arrangement = build_arrangement(
-            text_features=context["text_features"],
-            melody_analysis=context["melody_analysis"],
-            tempo=request.tempo,
-            key=request.key,
-            bars=request.bars,
-            seed=candidate_seed,
-        )
+        arrangement = None
+        final_seed = candidate_seed
+        for attempt in range(12):
+            attempt_seed = candidate_seed + attempt * 997
+            candidate_arrangement = build_arrangement(
+                text_features=context["text_features"],
+                melody_analysis=context["melody_analysis"],
+                tempo=request.tempo,
+                key=request.key,
+                bars=request.bars,
+                seed=attempt_seed,
+            )
+            signature = (tuple(candidate_arrangement.progression_degrees), candidate_arrangement.progression_label)
+            if signature not in seen_signatures or attempt == 11:
+                arrangement = candidate_arrangement
+                final_seed = attempt_seed
+                seen_signatures.add(signature)
+                break
+        if arrangement is None:
+            raise RuntimeError("Failed to build candidate arrangement")
         if base_arrangement is not None:
             arrangement = Arrangement(
                 melody=base_arrangement.melody,
@@ -84,7 +105,15 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 bass_pattern=arrangement.bass_pattern,
             )
         candidate_dir = batch_dir / f"option_{index + 1:02d}"
-        result = _write_arrangement(candidate_dir, arrangement, request, candidate_index=index + 1, candidate_seed=candidate_seed, reroll_scope=reroll_scope)
+        result = _write_arrangement(
+            candidate_dir,
+            arrangement,
+            request,
+            melody_analysis=context["melody_analysis"],
+            candidate_index=index + 1,
+            candidate_seed=final_seed,
+            reroll_scope=reroll_scope,
+        )
         result.metadata["batch_dir"] = str(batch_dir)
         result.metadata["option_name"] = candidate_dir.name
         results.append(result)
@@ -168,7 +197,16 @@ def _prepare_context(request: GenerationRequest) -> dict[str, object]:
     }
 
 
-def _write_arrangement(run_dir: Path, arrangement: Arrangement, request: GenerationRequest, *, candidate_index: int | None, candidate_seed: int | None, reroll_scope: str) -> GenerationResult:
+def _write_arrangement(
+    run_dir: Path,
+    arrangement: Arrangement,
+    request: GenerationRequest,
+    *,
+    melody_analysis,
+    candidate_index: int | None,
+    candidate_seed: int | None,
+    reroll_scope: str,
+) -> GenerationResult:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     track_map = {
@@ -195,6 +233,8 @@ def _write_arrangement(run_dir: Path, arrangement: Arrangement, request: Generat
         "bars": arrangement.bars,
         "style_tags": arrangement.style_tags,
         "source_melody": str(request.melody_midi_path) if request.melody_midi_path else None,
+        "source_start_offset_ticks": None if melody_analysis is None else melody_analysis.source_start_offset_ticks,
+        "melody_aligned_to_start": melody_analysis is not None,
         "text": request.text,
         "files": [file.name for file in files],
         "progression_label": arrangement.progression_label,

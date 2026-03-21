@@ -46,6 +46,7 @@ class MelodyAnalysis:
     tempo_bpm: int | None
     bars: int
     phrase_length: int
+    source_start_offset_ticks: int = 0
 
 
 @dataclass(slots=True)

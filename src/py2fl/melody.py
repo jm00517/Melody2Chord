@@ -14,7 +14,9 @@ def analyze_melody_file(path: Path) -> MelodyAnalysis:
     if melodic_track is None or not melodic_track.notes:
         raise ValueError(f"No note data found in MIDI file: {path}")
 
-    notes = melodic_track.notes
+    original_notes = melodic_track.notes
+    start_offset = min(note.start for note in original_notes)
+    notes = _align_notes_to_start(original_notes, start_offset)
     key, mode = infer_key(notes)
     bars = infer_bars_from_notes(notes)
     phrase_length = max(1, min(8, _detect_phrase_length(notes, bars)))
@@ -26,6 +28,7 @@ def analyze_melody_file(path: Path) -> MelodyAnalysis:
         tempo_bpm=tempo_bpm,
         bars=bars,
         phrase_length=phrase_length,
+        source_start_offset_ticks=start_offset,
     )
 
 
@@ -43,6 +46,21 @@ def infer_key(notes: list[NoteEvent]) -> tuple[str, str]:
             best_score = minor_score
             best_key = (root_name, "minor")
     return best_key
+
+
+def _align_notes_to_start(notes: list[NoteEvent], start_offset: int) -> list[NoteEvent]:
+    if start_offset <= 0:
+        return list(notes)
+    return [
+        NoteEvent(
+            pitch=note.pitch,
+            start=max(0, note.start - start_offset),
+            duration=note.duration,
+            velocity=note.velocity,
+            channel=note.channel,
+        )
+        for note in notes
+    ]
 
 
 def _score_scale(root: int, intervals: list[int], counts: Counter[int]) -> int:
