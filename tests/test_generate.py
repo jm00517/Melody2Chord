@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from py2fl.generator import BATCH_META_FILENAME, generate_candidates, generate_song, load_batch_meta
+from py2fl.generator import BATCH_META_FILENAME, generate_candidates, generate_song, load_batch_meta, reroll_candidate_bar
 from py2fl.melody import analyze_melody_file
 from py2fl.midi import parse_midi_notes, write_midi
 from py2fl.models import BAR_TICKS, GenerationRequest, NoteEvent, TrackData
@@ -14,6 +14,8 @@ def test_generate_from_text(tmp_path: Path) -> None:
     assert result.metadata["input_mode"] == "text"
     assert result.metadata["tempo"] == 140
     assert len(result.files) == 6
+    assert result.metadata["full_progression_text"]
+    assert len(result.metadata["bar_summary"]) == 4
     assert (result.output_dir / "full_arrangement.mid").exists()
 
 
@@ -29,7 +31,24 @@ def test_generate_candidates_creates_multiple_options(tmp_path: Path) -> None:
     assert batch_meta["selected_option"] is None
     assert len(batch_meta["candidates"]) == 4
     assert batch_meta["candidates"][0]["preview_file"] == "full_arrangement.mid"
+    assert "full_progression_text" in batch_meta["candidates"][0]
 
+
+
+
+def test_reroll_candidate_bar_updates_candidate_meta(tmp_path: Path) -> None:
+    results = generate_candidates(GenerationRequest(text="dreamy rnb night drive", bars=4, seed=17, output_dir=tmp_path), count=2)
+    batch_dir = results[0].output_dir.parent
+    before = json.loads((results[0].output_dir / "meta.json").read_text(encoding="utf-8"))
+    rerolled = reroll_candidate_bar(batch_dir, candidate_index=1, bar_index=2, reroll_nonce=654321)
+    after = json.loads((results[0].output_dir / "meta.json").read_text(encoding="utf-8"))
+
+    assert rerolled["candidates"][0]["full_progression_text"] == after["full_progression_text"]
+    assert after["reroll_scope"] == "bar_harmony"
+    assert len(after["bar_summary"]) == 4
+    assert after["candidate_seed"] != before["candidate_seed"]
+    assert after["recently_updated_bar"] == 2
+    assert any(bar.get("recently_updated") for bar in after["bar_summary"])
 
 def test_generate_from_melody_preserves_melody(tmp_path: Path) -> None:
     melody_path = tmp_path / "melody_input.mid"
@@ -174,9 +193,39 @@ def test_web_app_renders_home(tmp_path: Path) -> None:
     assert captured["status"] == "200 OK"
     assert "Generate Options" in body
     assert "Preview Volume" in body
+    assert "large comparison view" in body
     assert "Mute Melody" in body
     assert "Mute Chords" in body
 
+
+
+
+def test_web_reroll_bar_fragment_response(tmp_path: Path) -> None:
+    app = Py2FLWebApp(output_dir=tmp_path)
+    results = generate_candidates(GenerationRequest(text="dreamy rnb night drive", bars=4, seed=19, output_dir=tmp_path), count=2)
+    batch_dir = results[0].output_dir.parent
+    body_bytes = f"batch_dir={batch_dir}&candidate_index=1&bar_index=2&reroll_nonce=42&fragment=1".encode("utf-8")
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = headers
+
+    body = b"".join(app({
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/reroll-bar",
+        "wsgi.input": io.BytesIO(body_bytes),
+        "CONTENT_LENGTH": str(len(body_bytes)),
+        "CONTENT_TYPE": "application/x-www-form-urlencoded",
+    }, start_response)).decode("utf-8")
+
+    assert captured["status"] == "200 OK"
+    assert 'data-fragment="candidate-tab"' in body
+    assert 'data-fragment="candidate-progress"' in body
+    assert 'data-fragment="bar-card"' in body
+    assert 'candidate-progress-1' in body
+    assert 'candidate-1-bar-2' in body
+    assert 'Recently Updated' in body
 
 def test_web_select_persists_batch_choice(tmp_path: Path) -> None:
     app = Py2FLWebApp(output_dir=tmp_path)
@@ -201,6 +250,10 @@ def test_web_select_persists_batch_choice(tmp_path: Path) -> None:
     assert captured["status"] == "200 OK"
     assert batch_meta["selected_option"] == 2
     assert "Selected Candidate" in body
+    assert "Harmony Timeline" in body
+    assert "Play Bar" in body
+    assert "Reroll Harmony" in body
+    assert "Recently Updated" in body
 
 
 def test_web_files_serves_preview_midi(tmp_path: Path) -> None:

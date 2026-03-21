@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, quote
 import uuid
 from wsgiref.simple_server import make_server
 
-from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta, select_candidate
+from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta, reroll_candidate_bar, select_candidate
 from .models import GenerationRequest
 
 TITLE = "py2fl Studio"
@@ -41,6 +41,13 @@ class Py2FLWebApp:
         if method == "POST" and path == "/select":
             try:
                 body = self._handle_select(environ)
+                return self._respond_html(start_response, "200 OK", body)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "POST" and path == "/reroll-bar":
+            try:
+                body = self._handle_reroll_bar(environ)
                 return self._respond_html(start_response, "200 OK", body)
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
@@ -104,6 +111,57 @@ class Py2FLWebApp:
         }
         return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
 
+
+    def _handle_reroll_bar(self, environ: dict) -> str:
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        batch_dir_value = _optional_text(form.getfirst("batch_dir"))
+        candidate_index = _optional_int(form.getfirst("candidate_index"))
+        bar_index = _optional_int(form.getfirst("bar_index"))
+        reroll_nonce = _optional_int(form.getfirst("reroll_nonce")) or 0
+        fragment = form.getfirst("fragment") == "1"
+        if not batch_dir_value or candidate_index is None or bar_index is None:
+            raise ValueError("batch_dir, candidate_index, and bar_index are required")
+
+        batch_dir = self._resolve_under_output(Path(batch_dir_value))
+        batch_meta = reroll_candidate_bar(batch_dir, candidate_index, bar_index, reroll_nonce=reroll_nonce)
+        candidates = _load_candidate_results_from_batch(batch_meta)
+        if fragment:
+            return self._render_reroll_bar_fragment(candidates, batch_meta, candidate_index, bar_index)
+        form_state = {
+            "text": _string_value(batch_meta.get("text")),
+            "tempo": _string_value(batch_meta.get("tempo")),
+            "key": _string_value(batch_meta.get("key")),
+            "genre": _string_value(batch_meta.get("genre")),
+            "bars": _string_value(batch_meta.get("bars")),
+            "seed": _string_value(batch_meta.get("seed")),
+            "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
+            "melody_source": _string_value(batch_meta.get("source_melody")),
+        }
+        return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
+
+
+    def _render_reroll_bar_fragment(self, candidates: list, batch_meta: dict[str, object], candidate_index: int, bar_index: int) -> str:
+        result = next((item for item in candidates if int(item.metadata.get("candidate_index") or 0) == candidate_index), None)
+        if result is None:
+            raise ValueError("Candidate not found for fragment render")
+        meta = result.metadata
+        preview_path = Path(result.output_dir) / str(meta.get("preview_file", "full_arrangement.mid"))
+        preview_url = html.escape(f"/files?path={quote(str(preview_path))}")
+        tempo = int(meta.get("tempo") or 120)
+        bar_summary = meta.get("bar_summary", [])
+        bar_data = next((bar for bar in bar_summary if int(bar.get("bar_index") or 0) == bar_index), None)
+        if bar_data is None:
+            raise ValueError("Bar not found for fragment render")
+        active_index = _active_candidate_index(candidates, batch_meta)
+        tab_html = _candidate_tab(result, active_index)
+        progress_html = _candidate_progress_header(result, batch_meta)
+        bar_html = _bar_card(bar_data, Path(result.output_dir).parent, candidate_index, preview_url, tempo)
+        return f"""<div data-fragment-root="reroll-bar">
+  <div data-fragment="candidate-tab">{tab_html}</div>
+  <div data-fragment="candidate-progress">{progress_html}</div>
+  <div data-fragment="bar-card">{bar_html}</div>
+</div>"""
+
     def _serve_file(self, environ: dict, start_response: Callable):
         query = parse_qs(environ.get("QUERY_STRING", ""))
         path_value = query.get("path", [""])[0]
@@ -141,7 +199,9 @@ class Py2FLWebApp:
             error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
 
         reroll_controls = ""
-        candidate_cards = ""
+        comparison_bar = ""
+        candidate_details = ""
+        active_index = _active_candidate_index(candidates or [], batch_meta)
         if candidates:
             reroll_controls = f"""
             <div class="actions">
@@ -149,7 +209,8 @@ class Py2FLWebApp:
               <form method="post" action="/generate">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="chords"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit" class="secondary">Reroll Chords</button></form>
             </div>
             """
-            candidate_cards = '<section class="candidate-grid">' + ''.join(_candidate_card(result, index, batch_meta) for index, result in enumerate(candidates, start=1)) + '</section>'
+            comparison_bar = '<section class="candidate-overview"><div class="overview-head"><h2>Candidate Overview</h2><p>Compare the full harmonic path first, then open one option in detail below.</p></div><div class="candidate-tabs">' + ''.join(_candidate_tab(result, active_index) for result in candidates) + '</div></section>'
+            candidate_details = '<section class="candidate-details">' + ''.join(_candidate_detail(result, batch_meta, active_index) for result in candidates) + '</section>'
 
         mute_controls = ''.join(
             f'<button type="button" class="ghost mute-toggle" data-track-toggle="{track_name}" aria-pressed="false">Mute {track_name}</button>'
@@ -203,18 +264,63 @@ class Py2FLWebApp:
     .error {{ border-color: rgba(178,74,43,0.3); background: rgba(255,238,229,0.92); }}
     .actions {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0 18px; }}
     .actions form {{ display: block; }}
-    .candidate-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 18px; }}
-    .candidate {{ position: relative; padding-top: 18px; }}
-    .candidate.selected {{ outline: 3px solid rgba(178,74,43,0.45); background: rgba(255,250,240,0.96); }}
-    .candidate .badge {{ position: absolute; top: -10px; left: 18px; background: var(--accent-dark); color: white; border-radius: 999px; padding: 6px 10px; font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; }}
-    .selected-mark {{ color: var(--accent-dark); font-weight: 700; margin-bottom: 10px; }}
-    .meta {{ display: grid; gap: 6px; color: var(--muted); font-size: 14px; margin-bottom: 12px; }}
+    .candidate-overview {{ display: grid; gap: 18px; margin: 16px 0 18px; }}
+    .overview-head {{ display: flex; justify-content: space-between; gap: 12px; align-items: end; }}
+    .overview-head p {{ margin: 0; color: var(--muted); max-width: 56ch; }}
+    .candidate-tabs {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }}
+    .candidate-tab {{ width: 100%; text-align: left; background: rgba(255,250,240,0.72); color: var(--ink); border: 1px solid var(--line); border-radius: 24px; padding: 18px; display: grid; gap: 10px; box-shadow: var(--shadow); }}
+    .candidate-tab.is-busy {{ opacity: 0.65; }}
+    .candidate-tab.active {{ background: linear-gradient(180deg, rgba(178,74,43,0.15), rgba(255,250,240,0.92)); border-color: rgba(178,74,43,0.35); }}
+    .candidate-tab-header {{ display: flex; justify-content: space-between; gap: 10px; align-items: start; }}
+    .candidate-tab strong {{ font-size: 17px; }}
+    .candidate-tab .mini {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent-dark); }}
+    .candidate-tab .progression {{ font-size: 14px; line-height: 1.45; color: var(--ink); }}
+    .candidate-tab .micro {{ display: flex; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }}
+    .candidate-details {{ display: grid; gap: 18px; }}
+    .candidate-detail {{ display: none; gap: 18px; }}
+    .candidate-detail.active {{ display: grid; }}
+    .detail-hero {{ display: grid; gap: 18px; grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr); align-items: start; }}
+    .progression-block {{ display: grid; gap: 12px; }}
+    .progression-block .label {{ font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-dark); }}
+    .progression-text {{ font-size: clamp(26px, 4vw, 46px); line-height: 1.08; letter-spacing: -0.02em; }}
+    .detail-meta {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
+    .meta-card {{ background: rgba(255,250,240,0.75); border: 1px solid var(--line); border-radius: 18px; padding: 14px 16px; display: grid; gap: 4px; }}
+    .meta-card span {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; }}
+    .meta-card strong {{ font-size: 18px; }}
+    .selected-mark {{ color: #365b3d; font-weight: 700; }}
     .path {{ word-break: break-all; color: var(--accent-dark); font-size: 13px; }}
-    .tags {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 14px; }}
+    .tags {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 0; }}
     .tag {{ background: rgba(178,74,43,0.08); color: var(--accent-dark); border-radius: 999px; padding: 6px 10px; font-size: 12px; }}
-    .files {{ padding-left: 20px; margin: 0 0 14px; }}
+    .detail-grid {{ display: grid; grid-template-columns: minmax(280px, 0.65fr) minmax(0, 1.35fr); gap: 18px; }}
+    .files {{ padding-left: 20px; margin: 0; }}
     .card-actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
     .card-actions form {{ display: block; }}
+    .timeline-panel {{ display: grid; gap: 16px; }}
+    .timeline-head p {{ margin: 6px 0 0; color: var(--muted); }}
+    .timeline-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }}
+    .bar-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 14px; background: rgba(255,250,240,0.72); display: grid; gap: 10px; transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease; }}
+    .bar-card.recently-updated {{ background: rgba(214, 123, 61, 0.18); border-color: rgba(178, 74, 43, 0.55); box-shadow: inset 0 0 0 1px rgba(178, 74, 43, 0.18); }}
+    .bar-card.is-busy {{ opacity: 0.65; pointer-events: none; }}
+    .bar-top {{ display: flex; align-items: start; justify-content: space-between; gap: 10px; }}
+    .bar-index {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; }}
+    .chord-name {{ font-size: 22px; }}
+    .bar-degree {{ color: var(--accent-dark); font-size: 13px; }}
+    .timeline-lane {{ display: grid; gap: 6px; }}
+    .lane-row {{ display: grid; gap: 6px; }}
+    .lane-label {{ font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.08em; }}
+    .lane-track {{ position: relative; height: 16px; border-radius: 999px; background: rgba(31,26,20,0.08); overflow: hidden; }}
+    .lane-fill {{ position: absolute; inset: 0 auto 0 0; border-radius: 999px; }}
+    .lane-fill.match {{ background: linear-gradient(90deg, #b24a2b, #d67b3d); }}
+    .lane-fill.full {{ width: 100%; background: linear-gradient(90deg, rgba(31,26,20,0.18), rgba(31,26,20,0.05)); }}
+    .bar-meta {{ display: grid; gap: 6px; color: var(--muted); font-size: 13px; }}
+    .bar-meta strong {{ color: var(--ink); }}
+    .bar-actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .bar-actions form {{ display: block; }}
+    .bar-action-btn {{ padding: 9px 14px; font-size: 12px; }}
+    .match-pill {{ justify-self: start; border-radius: 999px; padding: 6px 10px; background: rgba(178,74,43,0.1); color: var(--accent-dark); font-size: 12px; font-weight: 700; }}
+    .updated-pill {{ justify-self: start; border-radius: 999px; padding: 5px 10px; background: rgba(127, 47, 24, 0.18); color: #6f2412; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }}
+    .inline-error {{ color: #8a2f1b; font-size: 12px; line-height: 1.4; }}
+    .empty-state {{ color: var(--muted); font-size: 16px; padding: 24px 0 8px; }}
     .session-controls {{ display: grid; gap: 16px; margin-bottom: 18px; }}
     .control-block {{ display: grid; gap: 8px; }}
     .volume-row {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
@@ -223,7 +329,8 @@ class Py2FLWebApp:
     .volume-slider {{ width: 100%; accent-color: var(--accent); }}
     .mute-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
     .mute-toggle.active {{ background: linear-gradient(135deg, #6b5840, #9b866c); color: white; }}
-    @media (max-width: 900px) {{ .layout {{ grid-template-columns: 1fr; }} .grid {{ grid-template-columns: 1fr; }} .mute-grid {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 1100px) {{ .detail-hero {{ grid-template-columns: 1fr; }} .detail-grid {{ grid-template-columns: 1fr; }} .layout {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} .mute-grid {{ grid-template-columns: 1fr; }} .candidate-tabs {{ grid-template-columns: 1fr; }} .timeline-grid {{ grid-template-columns: 1fr; }} .detail-meta {{ grid-template-columns: 1fr; }} .overview-head {{ display: grid; }} .progression-text {{ font-size: 28px; }} }}
   </style>
 </head>
 <body>
@@ -231,7 +338,7 @@ class Py2FLWebApp:
     <header class="hero">
       <div class="eyebrow">FL Studio MIDI Generator</div>
       <h1>Generate. Compare. Listen. Choose.</h1>
-      <p class="lead">Create multiple arrangements from the same idea, audition them in the browser, mute parts, and keep the candidate you want.</p>
+      <p class="lead">Create multiple arrangements from the same idea, compare the full progression at a glance, then inspect one candidate in detail with melody-to-chord matching all the way through.</p>
     </header>
     <section class="layout">
       <section class="panel">
@@ -254,7 +361,7 @@ class Py2FLWebApp:
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
           <input type="hidden" name="melody_source" value="{html.escape(state.get("melody_source", ""))}">
-          <p class="hint">Enter text, a melody MIDI file, or both. After generation, you can preview `full_arrangement.mid`, adjust preview volume, and mute individual parts.</p>
+          <p class="hint">Enter text, a melody MIDI file, or both. The result view now shows the full chord path from start to finish plus a bar-by-bar melody match timeline.</p>
           <button type="submit">Generate Options</button>
         </form>
       </section>
@@ -274,7 +381,8 @@ class Py2FLWebApp:
           </div>
         </div>
         <div class="specs">
-          <div class="spec"><strong>Candidate generation</strong>Create 1 to 8 arrangement options in one pass. Each option can differ in progression, chord color, bass pattern, and drums.</div>
+          <div class="spec"><strong>Candidate overview</strong>Use the top comparison bar to scan every option's progression before opening one in detail.</div>
+          <div class="spec"><strong>Harmony timeline</strong>Each detailed view shows bar-by-bar chords, representative melody pitches, and a simple match percentage.</div>
           <div class="spec"><strong>Browser playback</strong>Each candidate previews its `full_arrangement.mid` file directly in the browser with a lightweight synth setup.</div>
           <div class="spec"><strong>Saved selection</strong>`Select This` stores the chosen option in <code>{BATCH_META_FILENAME}</code> inside the batch folder.</div>
           <div class="spec"><strong>Output root</strong>Files are written under {html.escape(str(self.output_dir))}, with batch folders and `option_01`, `option_02` style candidate directories.</div>
@@ -283,7 +391,8 @@ class Py2FLWebApp:
     </section>
     {error_html}
     {reroll_controls}
-    {candidate_cards}
+    {comparison_bar}
+    {candidate_details or '<section class="empty-state">Generate a candidate set to see the large comparison view and the melody/chord timeline.</section>'}
   </main>
   <script type="module">
     import * as Tone from 'https://cdn.jsdelivr.net/npm/tone@15.0.4/+esm';
@@ -323,6 +432,15 @@ class Py2FLWebApp:
       }});
     }}
 
+    function setActiveCandidate(candidateId) {{
+      document.querySelectorAll('[data-candidate-tab]').forEach((button) => {{
+        button.classList.toggle('active', button.dataset.candidateTab === candidateId);
+      }});
+      document.querySelectorAll('[data-candidate-detail]').forEach((panel) => {{
+        panel.classList.toggle('active', panel.dataset.candidateDetail === candidateId);
+      }});
+    }}
+
     setPreviewVolume(DEFAULT_VOLUME);
     TRACK_NAMES.forEach((trackName) => setTrackMuted(trackName, false));
 
@@ -350,7 +468,7 @@ class Py2FLWebApp:
       }}
     }}
 
-    async function playCandidate(url, buttons) {{
+    async function playCandidate(url, buttons, segment = null) {{
       await Tone.start();
       await stopPlayback();
       const response = await fetch(url);
@@ -359,6 +477,10 @@ class Py2FLWebApp:
       }}
       const midi = new Midi(await response.arrayBuffer());
       let lastTime = 0;
+
+      const ppq = midi.header.ppq || 480;
+      const tempo = segment?.tempo || 120;
+      const secPerTick = 60 / tempo / ppq;
 
       midi.tracks.forEach((track, index) => {{
         if (!track.notes.length) return;
@@ -369,11 +491,23 @@ class Py2FLWebApp:
           synthRegistry.set(name, synth);
         }}
         track.notes.forEach((note) => {{
-          lastTime = Math.max(lastTime, note.time + note.duration);
+          let startTime = note.time;
+          let duration = note.duration;
+          if (segment) {{
+            const noteStart = note.ticks ?? Math.round(note.time / secPerTick);
+            const noteDurationTicks = note.durationTicks ?? Math.round(note.duration / secPerTick);
+            const noteEnd = noteStart + noteDurationTicks;
+            if (noteEnd <= segment.startTick || noteStart >= segment.endTick) return;
+            const overlapStart = Math.max(noteStart, segment.startTick);
+            const overlapEnd = Math.min(noteEnd, segment.endTick);
+            startTime = (overlapStart - segment.startTick) * secPerTick;
+            duration = Math.max(secPerTick / 4, (overlapEnd - overlapStart) * secPerTick);
+          }}
+          lastTime = Math.max(lastTime, startTime + duration);
           Tone.Transport.schedule((time) => {{
             if (mutedTracks.has(name)) return;
-            synth.triggerAttackRelease(note.name, note.duration, time, Math.max(0.08, (note.velocity || 0.7) * 0.35));
-          }}, note.time);
+            synth.triggerAttackRelease(note.name, duration, time, Math.max(0.08, (note.velocity || 0.7) * 0.35));
+          }}, startTime);
         }});
       }});
 
@@ -406,24 +540,119 @@ class Py2FLWebApp:
       }});
     }});
 
-    document.querySelectorAll('[data-preview-url]').forEach((button) => {{
-      button.addEventListener('click', async () => {{
-        const card = button.closest('.candidate');
-        const stop = card.querySelector('[data-stop]');
-        try {{
-          await playCandidate(button.dataset.previewUrl, {{ play: button, stop }});
-        }} catch (error) {{
-          console.error(error);
-          await stopPlayback();
-        }}
+    function bindPreviewButtons(root = document) {{
+      root.querySelectorAll('[data-preview-url]').forEach((button) => {{
+        if (button.dataset.boundPreview === '1') return;
+        button.dataset.boundPreview = '1';
+        button.addEventListener('click', async () => {{
+          const card = button.closest('[data-candidate-detail]') || button.closest('.bar-card');
+          const detail = button.closest('[data-candidate-detail]');
+          const stop = detail ? detail.querySelector('[data-stop]') : document.querySelector('[data-candidate-detail].active [data-stop]');
+          const segment = button.dataset.previewStart ? {{
+            startTick: Number(button.dataset.previewStart),
+            endTick: Number(button.dataset.previewEnd),
+            tempo: Number(button.dataset.previewTempo || 120),
+          }} : null;
+          try {{
+            await playCandidate(button.dataset.previewUrl, {{ play: button, stop }}, segment);
+          }} catch (error) {{
+            console.error(error);
+            await stopPlayback();
+          }}
+        }});
       }});
-    }});
+    }}
 
-    document.querySelectorAll('[data-stop]').forEach((button) => {{
-      button.addEventListener('click', async () => {{
-        await stopPlayback();
+    function bindStopButtons(root = document) {{
+      root.querySelectorAll('[data-stop]').forEach((button) => {{
+        if (button.dataset.boundStop === '1') return;
+        button.dataset.boundStop = '1';
+        button.addEventListener('click', async () => {{
+          await stopPlayback();
+        }});
       }});
-    }});
+    }}
+
+    function bindCandidateTabs(root = document) {{
+      root.querySelectorAll('[data-candidate-tab]').forEach((button) => {{
+        if (button.dataset.boundTab === '1') return;
+        button.dataset.boundTab = '1';
+        button.addEventListener('click', () => {{
+          setActiveCandidate(button.dataset.candidateTab);
+        }});
+      }});
+    }}
+
+    async function rerollBar(form) {{
+      const barCard = form.closest('.bar-card');
+      const candidateIndex = form.querySelector('[name="candidate_index"]').value;
+      const barIndex = form.querySelector('[name="bar_index"]').value;
+      const tab = document.getElementById(`candidate-tab-${{candidateIndex}}`);
+      const progress = document.getElementById(`candidate-progress-${{candidateIndex}}`);
+      const errorNode = barCard?.querySelector('.inline-error');
+      const formData = new FormData(form);
+      formData.set('fragment', '1');
+      if (errorNode) {{
+        errorNode.hidden = true;
+        errorNode.textContent = '';
+      }}
+      barCard?.classList.add('is-busy');
+      tab?.classList.add('is-busy');
+      try {{
+        const response = await fetch('/reroll-bar', {{ method: 'POST', body: formData }});
+        const html = await response.text();
+        if (!response.ok) {{
+          throw new Error(html || `Reroll failed: ${{response.status}}`);
+        }}
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const nextTab = doc.querySelector('[data-fragment="candidate-tab"] > *');
+        const nextProgress = doc.querySelector('[data-fragment="candidate-progress"] > *');
+        const nextBar = doc.querySelector('[data-fragment="bar-card"] > *');
+        if (nextTab && tab) {{
+          tab.replaceWith(nextTab);
+          bindCandidateTabs(document);
+        }}
+        if (nextProgress && progress) {{
+          progress.replaceWith(nextProgress);
+        }}
+        const currentBar = document.getElementById(`candidate-${{candidateIndex}}-bar-${{barIndex}}`);
+        if (nextBar && currentBar) {{
+          currentBar.replaceWith(nextBar);
+          bindPreviewButtons(document);
+          bindRerollForms(document);
+        }}
+      }} catch (error) {{
+        console.error(error);
+        if (errorNode) {{
+          errorNode.hidden = false;
+          errorNode.textContent = error instanceof Error ? error.message : String(error);
+        }}
+      }} finally {{
+        barCard?.classList.remove('is-busy');
+        tab?.classList.remove('is-busy');
+      }}
+    }}
+
+    function bindRerollForms(root = document) {{
+      root.querySelectorAll('[data-reroll-bar-form]').forEach((form) => {{
+        if (form.dataset.boundReroll === '1') return;
+        form.dataset.boundReroll = '1';
+        form.addEventListener('submit', async (event) => {{
+          event.preventDefault();
+          await rerollBar(form);
+        }});
+      }});
+    }}
+
+    bindPreviewButtons(document);
+    bindStopButtons(document);
+    bindCandidateTabs(document);
+    bindRerollForms(document);
+
+    const initialCandidate = document.querySelector('[data-candidate-tab].active')?.dataset.candidateTab;
+    if (initialCandidate) {{
+      setActiveCandidate(initialCandidate);
+    }}
 
     window.addEventListener('beforeunload', () => {{ stopPlayback(); }});
   </script>
@@ -446,16 +675,74 @@ class Py2FLWebApp:
         return [payload]
 
 
-def _candidate_card(result, index: int, batch_meta: dict[str, object] | None) -> str:
+def _active_candidate_index(candidates: list, batch_meta: dict[str, object] | None) -> int:
+    if batch_meta:
+        selected_option = batch_meta.get("selected_option")
+        if isinstance(selected_option, int):
+            return selected_option
+    if candidates:
+        value = candidates[0].metadata.get("candidate_index")
+        return int(value) if value is not None else 1
+    return 1
+
+
+def _candidate_tab(result, active_index: int) -> str:
     meta = result.metadata
-    tags = ''.join(f'<span class="tag">{html.escape(str(tag))}</span>' for tag in meta.get("style_tags", []))
-    file_list = ''.join(f'<li><code>{html.escape(path.name)}</code></li>' for path in result.files)
-    batch_dir = Path(result.output_dir).parent
+    candidate_index = int(meta.get("candidate_index") or 1)
+    active = candidate_index == active_index
+    tags = " ".join(str(tag) for tag in meta.get("style_tags", [])[:3])
+    return f"""
+    <button type="button" id="candidate-tab-{candidate_index}" class="candidate-tab {'active' if active else ''}" data-candidate-tab="candidate-{candidate_index}" data-candidate-index="{candidate_index}">
+      <div class="candidate-tab-header">
+        <div>
+          <div class="mini">Option {candidate_index:02d}</div>
+          <strong>{html.escape(str(meta.get('progression_label', 'Candidate')))}</strong>
+        </div>
+        <span class="mini">Seed {html.escape(str(meta.get('candidate_seed')))}</span>
+      </div>
+      <div class="progression">{html.escape(str(meta.get('full_progression_text', meta.get('progression_label', ''))))}</div>
+      <div class="micro">
+        <span>{html.escape(str(meta.get('key')))}</span>
+        <span>{html.escape(str(meta.get('tempo')))} BPM</span>
+        <span>{html.escape(str(meta.get('drum_pattern')))}</span>
+        <span>{html.escape(str(meta.get('bass_pattern')))}</span>
+        <span>{html.escape(tags or 'No tags')}</span>
+      </div>
+    </button>
+    """
+
+
+def _candidate_progress_header(result, batch_meta: dict[str, object] | None) -> str:
+    meta = result.metadata
+    candidate_index = int(meta.get("candidate_index") or 1)
     selected_option = None if not batch_meta else batch_meta.get("selected_option")
     selected = selected_option == meta.get("candidate_index")
+    tags = ''.join(f'<span class="tag">{html.escape(str(tag))}</span>' for tag in meta.get("style_tags", []))
+    selected_html = '<div class="selected-mark">Selected Candidate</div>' if selected else ''
+    return f"""
+        <div class="progression-block" id="candidate-progress-{candidate_index}" data-candidate-progress="{candidate_index}">
+          <div class="label">Full progression</div>
+          <div class="progression-text">{html.escape(str(meta.get('full_progression_text', meta.get('progression_label', 'Candidate'))))}</div>
+          <div class="tags">{tags}</div>
+          {selected_html}
+          <p class="path">{html.escape(str(result.output_dir))}</p>
+        </div>
+    """
+
+
+def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index: int) -> str:
+    meta = result.metadata
+    candidate_index = int(meta.get("candidate_index") or 1)
+    active = candidate_index == active_index
+    batch_dir = Path(result.output_dir).parent
     preview_path = Path(result.output_dir) / str(meta.get("preview_file", "full_arrangement.mid"))
     preview_url = f"/files?path={quote(str(preview_path))}"
-    selected_html = '<div class="selected-mark">Selected Candidate</div>' if selected else ''
+    preview_url_escaped = html.escape(preview_url)
+    tempo = int(meta.get("tempo") or 120)
+    file_list = ''.join(f'<li><code>{html.escape(path.name)}</code></li>' for path in result.files)
+    timeline = _timeline_blocks(meta.get("bar_summary", []), batch_dir, candidate_index, preview_url_escaped, tempo)
+    selected_option = None if not batch_meta else batch_meta.get("selected_option")
+    selected = selected_option == meta.get("candidate_index")
     select_form = f"""
       <form method="post" action="/select">
         <input type="hidden" name="batch_dir" value="{html.escape(str(batch_dir))}">
@@ -464,26 +751,98 @@ def _candidate_card(result, index: int, batch_meta: dict[str, object] | None) ->
       </form>
     """
     return f"""
-    <article class="panel candidate {'selected' if selected else ''}" id="candidate-{index}">
-      <div class="badge">Option {index:02d}</div>
-      {selected_html}
-      <h2>{html.escape(str(meta.get('progression_label', 'Candidate')))}</h2>
-      <div class="meta">
-        <div><strong>Seed</strong> {html.escape(str(meta.get('candidate_seed')))}</div>
-        <div><strong>Tempo</strong> {html.escape(str(meta.get('tempo')))} BPM</div>
-        <div><strong>Key</strong> {html.escape(str(meta.get('key')))} </div>
-        <div><strong>Drums</strong> {html.escape(str(meta.get('drum_pattern')))}</div>
-        <div><strong>Bass</strong> {html.escape(str(meta.get('bass_pattern')))}</div>
-      </div>
-      <div class="tags">{tags}</div>
-      <p class="path">{html.escape(str(result.output_dir))}</p>
-      <ul class="files">{file_list}</ul>
-      <div class="card-actions">
-        <button type="button" class="ghost" data-preview-url="{html.escape(preview_url)}">Play</button>
-        <button type="button" class="ghost" data-stop disabled>Stop</button>
-        {select_form}
-      </div>
+    <article class="panel candidate-detail {'active' if active else ''}" data-candidate-detail="candidate-{candidate_index}" id="candidate-{candidate_index}">
+      <section class="detail-hero">
+        {_candidate_progress_header(result, batch_meta)}
+        <div class="detail-meta">
+          <div class="meta-card"><span>Progression Label</span><strong>{html.escape(str(meta.get('progression_label')))}</strong></div>
+          <div class="meta-card"><span>Seed</span><strong>{html.escape(str(meta.get('candidate_seed')))}</strong></div>
+          <div class="meta-card"><span>Tempo</span><strong>{html.escape(str(meta.get('tempo')))} BPM</strong></div>
+          <div class="meta-card"><span>Key</span><strong>{html.escape(str(meta.get('key')))}</strong></div>
+          <div class="meta-card"><span>Drums</span><strong>{html.escape(str(meta.get('drum_pattern')))}</strong></div>
+          <div class="meta-card"><span>Bass</span><strong>{html.escape(str(meta.get('bass_pattern')))}</strong></div>
+        </div>
+      </section>
+      <section class="detail-grid">
+        <div class="panel">
+          <h3>Files and actions</h3>
+          <div class="card-actions">
+            <button type="button" class="ghost" data-preview-url="{html.escape(preview_url)}">Play</button>
+            <button type="button" class="ghost" data-stop disabled>Stop</button>
+            {select_form}
+          </div>
+          <ul class="files">{file_list}</ul>
+        </div>
+        <div class="panel timeline-panel">
+          <div class="timeline-head">
+            <h3>Harmony Timeline</h3>
+            <p>Each bar shows the chosen chord, representative melody tones, and how much of the melody sits inside the chord tones.</p>
+          </div>
+          <div class="timeline-grid">{timeline}</div>
+        </div>
+      </section>
     </article>
+    """
+
+
+def _timeline_blocks(bar_summary: list[dict[str, object]], batch_dir: Path, candidate_index: int, preview_url: str, tempo: int) -> str:
+    if not bar_summary:
+        return '<div class="bar-card"><div class="bar-meta">No timeline data available.</div></div>'
+    cards = []
+    for bar in bar_summary:
+        cards.append(_bar_card(bar, batch_dir, candidate_index, preview_url, tempo))
+    return ''.join(cards)
+
+
+def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, preview_url: str, tempo: int) -> str:
+    percent = int(bar.get("matching_percent", 0) or 0)
+    melody = ", ".join(str(value) for value in bar.get("representative_melody_pitches", [])) or "-"
+    chord_tones = ", ".join(str(value) for value in bar.get("chord_tones", [])) or "-"
+    degree = bar.get("degree")
+    degree_text = f"Degree {degree}" if degree else "Degree -"
+    start_tick = int(bar.get("start_tick") or 0)
+    end_tick = int(bar.get("end_tick") or start_tick)
+    bar_index = int(bar.get("bar_index") or 0)
+    reroll_nonce = uuid.uuid4().int % 1_000_000
+    recently_updated = bool(bar.get("recently_updated"))
+    updated_pill = "<div class=\"updated-pill\">Recently Updated</div>" if recently_updated else ""
+    return f"""
+            <div class="bar-card {'recently-updated' if recently_updated else ''}" id="candidate-{candidate_index}-bar-{bar_index}" data-bar-card="{bar_index}" data-candidate-index="{candidate_index}">
+              <div class="bar-top">
+                <div>
+                  <div class="bar-index">Bar {html.escape(str(bar_index))}</div>
+                  <div class="chord-name">{html.escape(str(bar.get('chord_name', 'No chord')))}</div>
+                </div>
+                <div class="bar-degree">{html.escape(degree_text)}</div>
+              </div>
+              <div class="timeline-lane">
+                <div class="lane-row">
+                  <div class="lane-label">Chord span</div>
+                  <div class="lane-track"><div class="lane-fill full"></div></div>
+                </div>
+                <div class="lane-row">
+                  <div class="lane-label">Melody match</div>
+                  <div class="lane-track"><div class="lane-fill match" style="width: {percent}%;"></div></div>
+                </div>
+              </div>
+              <div class="match-pill">{percent}% match</div>
+              {updated_pill}
+              <div class="bar-meta">
+                <div><strong>Chord tones</strong> {html.escape(chord_tones)}</div>
+                <div><strong>Melody focus</strong> {html.escape(melody)}</div>
+              </div>
+              <div class="bar-actions">
+                <button type="button" class="ghost bar-action-btn" data-preview-url="{preview_url}" data-preview-start="{start_tick}" data-preview-end="{end_tick}" data-preview-tempo="{tempo}">Play Bar</button>
+                <form method="post" action="/reroll-bar" data-reroll-bar-form>
+                  <input type="hidden" name="batch_dir" value="{html.escape(str(batch_dir))}">
+                  <input type="hidden" name="candidate_index" value="{candidate_index}">
+                  <input type="hidden" name="bar_index" value="{bar_index}">
+                  <input type="hidden" name="reroll_nonce" value="{reroll_nonce}">
+                  <button type="submit" class="secondary bar-action-btn">Reroll Harmony</button>
+                </form>
+              </div>
+              <div class="inline-error" hidden></div>
+            </div>
     """
 
 

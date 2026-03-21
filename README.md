@@ -722,3 +722,17 @@ py2fl serve --port 8765 --out ./exports
 - Melody-driven chord generation now uses progression-aware scoring instead of simple per-bar triad matching.
 - Chord candidates can include `7th`, `add9`, `sus2`, and `sus4` voicings.
 - Browser candidate previews should now expose more harmonic variation when melody input is provided.
+
+
+## Latest Web Layout Updates
+
+
+- Each `Harmony Timeline` bar now includes `Play Bar` for bar-local preview and `Reroll Harmony` for bar-local chord+bass replacement.
+- The most recently rerolled bar is highlighted with a darker card background and a `Recently Updated` label.
+- Bar preview is browser-side only and plays the selected timeline slice from `full_arrangement.mid`.
+- Bar reroll preserves melody and drums, and rewrites only that bar's harmony layer in the candidate output files.
+- The result view now uses a top `Candidate Overview` comparison bar instead of showing all options as equal-width cards.
+- Each candidate now exposes `full_progression_text` and `bar_summary` in `meta.json`.
+- The detailed candidate view shows a large full progression header, expanded metadata, and a `Harmony Timeline` section.
+- `Harmony Timeline` renders one bar per block with chord name, degree, representative melody pitches, chord tones, and a simple melody-to-chord match percentage.
+- Browser playback, preview volume, reroll actions, and part mute controls are still shared across the page.
