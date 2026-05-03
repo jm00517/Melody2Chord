@@ -21,6 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--key", help="Key override, for example C, F#, or A.")
     generate_parser.add_argument("--genre", help="Genre hint, for example trap or rnb.")
     generate_parser.add_argument("--bars", type=int, help="Number of bars to generate.")
+    generate_parser.add_argument("--chord-density", choices=["1", "2", "3", "auto"], help="Chord changes per bar. Default: auto")
+    generate_parser.add_argument("--melody-density", choices=["sparse", "normal", "dense", "xdense", "auto"], help="Melody note density. Default: auto")
+    generate_parser.add_argument("--chord-rhythm-style", choices=["hold", "stab", "strum", "auto"], help="Chord rhythm playback style. Default: auto")
     generate_parser.add_argument("--seed", type=int, help="Random seed for reproducible output.")
     generate_parser.add_argument("--count", type=int, default=1, help="Number of candidate options to generate.")
     generate_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory.")
@@ -47,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
             key=args.key,
             genre=args.genre,
             bars=args.bars,
+            chord_density=None if args.chord_density == "auto" else args.chord_density,
+            melody_density=None if args.melody_density == "auto" else args.melody_density,
+            chord_rhythm_style=None if args.chord_rhythm_style == "auto" else args.chord_rhythm_style,
             seed=args.seed,
             output_dir=args.out,
         )

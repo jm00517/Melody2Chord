@@ -64,6 +64,9 @@ class Arrangement:
     progression_degrees: list[int] = field(default_factory=list)
     drum_pattern: str = ""
     bass_pattern: str = ""
+    chord_density: int = 1
+    melody_density: str = "normal"
+    chord_rhythm_style: str = "hold"
 
 
 @dataclass(slots=True)
@@ -75,6 +78,9 @@ class GenerationRequest:
     key: str | None = None
     genre: str | None = None
     bars: int | None = None
+    chord_density: str | None = None
+    melody_density: str | None = None
+    chord_rhythm_style: str | None = None
     seed: int | None = None
     output_dir: Path = Path("exports")
 

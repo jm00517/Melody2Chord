@@ -174,6 +174,59 @@ def test_generate_from_melody_adds_chord_variation(tmp_path: Path) -> None:
     assert "MeloFlow" in result.metadata["progression_label"]
 
 
+def test_generate_with_density_options_updates_metadata_and_sub_chords(tmp_path: Path) -> None:
+    result = generate_song(
+        GenerationRequest(
+            text="dreamy rnb night drive",
+            bars=4,
+            chord_density="3",
+            melody_density="dense",
+            chord_rhythm_style="strum",
+            seed=22,
+            output_dir=tmp_path,
+        )
+    )
+
+    assert result.metadata["requested_chord_density"] == "3"
+    assert result.metadata["resolved_chord_density"] == 3
+    assert result.metadata["resolved_melody_density"] == "dense"
+    assert result.metadata["resolved_chord_rhythm_style"] == "strum"
+    assert any(bar["chord_event_count"] > 1 for bar in result.metadata["bar_summary"])
+
+
+def test_dense_melody_density_increases_generated_note_count(tmp_path: Path) -> None:
+    normal = generate_song(GenerationRequest(text="dreamy rnb night drive", bars=4, melody_density="normal", seed=30, output_dir=tmp_path / "normal"))
+    dense = generate_song(GenerationRequest(text="dreamy rnb night drive", bars=4, melody_density="xdense", seed=30, output_dir=tmp_path / "dense"))
+
+    normal_tracks, _ = parse_midi_notes(normal.output_dir / "melody.mid")
+    dense_tracks, _ = parse_midi_notes(dense.output_dir / "melody.mid")
+    normal_count = len(next(track for track in normal_tracks if track.notes).notes)
+    dense_count = len(next(track for track in dense_tracks if track.notes).notes)
+
+    assert dense_count > normal_count
+
+
+def test_chord_density_and_strum_change_chord_timing(tmp_path: Path) -> None:
+    result = generate_song(
+        GenerationRequest(
+            chord_progression="Am-F-C-G",
+            text="dreamy rnb topline",
+            bars=4,
+            chord_density="2",
+            chord_rhythm_style="strum",
+            seed=31,
+            output_dir=tmp_path,
+        )
+    )
+
+    chord_tracks, _ = parse_midi_notes(result.output_dir / "chords.mid")
+    chord_notes = next(track for track in chord_tracks if track.notes).notes
+    starts_in_first_bar = sorted({note.start for note in chord_notes if note.start < BAR_TICKS})
+
+    assert len(starts_in_first_bar) >= 2
+    assert any(start not in {0, BAR_TICKS // 2} for start in starts_in_first_bar)
+
+
 def test_web_app_renders_home(tmp_path: Path) -> None:
     app = Py2FLWebApp(output_dir=tmp_path)
     captured = {}

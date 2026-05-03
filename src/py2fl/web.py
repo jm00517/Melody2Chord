@@ -71,6 +71,9 @@ class Py2FLWebApp:
         key = _optional_text(form.getfirst("key"))
         genre = _optional_text(form.getfirst("genre"))
         bars = _optional_int(form.getfirst("bars"))
+        chord_density = _normalize_auto_option(form.getfirst("chord_density"))
+        melody_density = _normalize_auto_option(form.getfirst("melody_density"))
+        chord_rhythm_style = _normalize_auto_option(form.getfirst("chord_rhythm_style"))
         seed = _optional_int(form.getfirst("seed"))
         count = _optional_int(form.getfirst("count")) or 4
         count = max(1, min(count, 8))
@@ -91,6 +94,9 @@ class Py2FLWebApp:
             key=key,
             genre=genre,
             bars=bars,
+            chord_density=chord_density,
+            melody_density=melody_density,
+            chord_rhythm_style=chord_rhythm_style,
             seed=seed,
             output_dir=self.output_dir,
         )
@@ -107,6 +113,9 @@ class Py2FLWebApp:
         key = _optional_text(form.getfirst("key"))
         genre = _optional_text(form.getfirst("genre"))
         bars = _optional_int(form.getfirst("bars"))
+        chord_density = _normalize_auto_option(form.getfirst("chord_density"))
+        melody_density = _normalize_auto_option(form.getfirst("melody_density"))
+        chord_rhythm_style = _normalize_auto_option(form.getfirst("chord_rhythm_style"))
         seed = _optional_int(form.getfirst("seed"))
         count = _optional_int(form.getfirst("count")) or 4
         count = max(1, min(count, 8))
@@ -123,6 +132,9 @@ class Py2FLWebApp:
             key=key,
             genre=genre,
             bars=bars,
+            chord_density=chord_density,
+            melody_density=melody_density,
+            chord_rhythm_style=chord_rhythm_style,
             seed=seed,
             output_dir=self.output_dir,
         )
@@ -147,6 +159,9 @@ class Py2FLWebApp:
             "key": _string_value(batch_meta.get("key")),
             "genre": _string_value(batch_meta.get("genre")),
             "bars": _string_value(batch_meta.get("bars")),
+            "chord_density": _string_value(batch_meta.get("chord_density")) or "auto",
+            "melody_density": _string_value(batch_meta.get("melody_density")) or "auto",
+            "chord_rhythm_style": _string_value(batch_meta.get("chord_rhythm_style")) or "auto",
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
@@ -162,12 +177,13 @@ class Py2FLWebApp:
         candidate_index = _optional_int(form.getfirst("candidate_index"))
         bar_index = _optional_int(form.getfirst("bar_index"))
         reroll_nonce = _optional_int(form.getfirst("reroll_nonce")) or 0
+        chord_density_override = _normalize_bar_density_option(form.getfirst("bar_chord_density"))
         fragment = form.getfirst("fragment") == "1"
         if not batch_dir_value or candidate_index is None or bar_index is None:
             raise ValueError("batch_dir, candidate_index, and bar_index are required")
 
         batch_dir = self._resolve_under_output(Path(batch_dir_value))
-        batch_meta = reroll_candidate_bar(batch_dir, candidate_index, bar_index, reroll_nonce=reroll_nonce)
+        batch_meta = reroll_candidate_bar(batch_dir, candidate_index, bar_index, reroll_nonce=reroll_nonce, chord_density_override=chord_density_override)
         candidates = _load_candidate_results_from_batch(batch_meta)
         if fragment:
             return self._render_reroll_bar_fragment(candidates, batch_meta, candidate_index, bar_index)
@@ -177,6 +193,9 @@ class Py2FLWebApp:
             "key": _string_value(batch_meta.get("key")),
             "genre": _string_value(batch_meta.get("genre")),
             "bars": _string_value(batch_meta.get("bars")),
+            "chord_density": _string_value(batch_meta.get("chord_density")) or "auto",
+            "melody_density": _string_value(batch_meta.get("melody_density")) or "auto",
+            "chord_rhythm_style": _string_value(batch_meta.get("chord_rhythm_style")) or "auto",
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
@@ -295,7 +314,7 @@ class Py2FLWebApp:
     form {{ display: grid; gap: 16px; }}
     .grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }}
     label {{ display: grid; gap: 8px; font-size: 14px; color: var(--muted); }}
-    input, textarea {{ width: 100%; border: 1px solid rgba(31,26,20,0.14); border-radius: 16px; padding: 14px 16px; background: var(--surface-strong); color: var(--ink); font: inherit; }}
+    input, textarea, select {{ width: 100%; border: 1px solid rgba(31,26,20,0.14); border-radius: 16px; padding: 14px 16px; background: var(--surface-strong); color: var(--ink); font: inherit; }}
     textarea {{ min-height: 180px; resize: vertical; }}
     input[type=file] {{ padding: 12px; }}
     .hint {{ color: var(--muted); font-size: 13px; line-height: 1.5; }}
@@ -358,8 +377,11 @@ class Py2FLWebApp:
     .lane-fill {{ position: absolute; inset: 0 auto 0 0; border-radius: 999px; }}
     .lane-fill.match {{ background: linear-gradient(90deg, #b24a2b, #d67b3d); }}
     .lane-fill.full {{ width: 100%; background: linear-gradient(90deg, rgba(31,26,20,0.18), rgba(31,26,20,0.05)); }}
-    .bar-meta {{ display: grid; gap: 6px; color: var(--muted); font-size: 13px; }}
+    .bar-meta {{ display: grid; gap: 8px; color: var(--muted); font-size: 13px; }}
     .bar-meta strong {{ color: var(--ink); }}
+    .chord-chip-row {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .chord-chip {{ background: rgba(178,74,43,0.1); color: var(--accent-dark); border: 1px solid rgba(178,74,43,0.18); border-radius: 999px; padding: 6px 10px; font-size: 12px; cursor: help; }}
+    .bar-density-select {{ min-width: 110px; padding: 8px 12px; }}
     .bar-actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
     .bar-actions form {{ display: block; }}
     .bar-action-btn {{ padding: 9px 14px; font-size: 12px; }}
@@ -403,6 +425,9 @@ class Py2FLWebApp:
             <label>Key<input type="text" name="key" placeholder="Example: F#, A minor" value="{html.escape(state.get("key", ""))}"></label>
             <label>Genre<input type="text" name="genre" placeholder="Example: trap, rnb, house" value="{html.escape(state.get("genre", ""))}"></label>
             <label>Bars<input type="number" name="bars" min="1" max="128" placeholder="auto" value="{html.escape(state.get("bars", ""))}"></label>
+            {_select_field_html("Chord Density", "chord_density", state.get("chord_density", "auto"), [("auto", "Auto"), ("1", "1 per bar"), ("2", "2 per bar"), ("3", "3 per bar")])}
+            {_select_field_html("Melody Density", "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
+            {_select_field_html("Chord Rhythm", "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
             <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
@@ -770,7 +795,7 @@ class Py2FLWebApp:
     form {{ display: grid; gap: 16px; }}
     .grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }}
     label {{ display: grid; gap: 8px; font-size: 14px; color: var(--muted); }}
-    input, textarea {{ width: 100%; border: 1px solid rgba(31,26,20,0.14); border-radius: 16px; padding: 14px 16px; background: var(--surface-strong); color: var(--ink); font: inherit; }}
+    input, textarea, select {{ width: 100%; border: 1px solid rgba(31,26,20,0.14); border-radius: 16px; padding: 14px 16px; background: var(--surface-strong); color: var(--ink); font: inherit; }}
     textarea {{ min-height: 180px; resize: vertical; }}
     .hint {{ color: var(--muted); font-size: 13px; line-height: 1.5; }}
     button {{ border: 0; border-radius: 999px; padding: 12px 18px; background: linear-gradient(135deg, var(--accent), var(--accent-soft)); color: white; font-size: 14px; font-weight: 700; cursor: pointer; }}
@@ -815,6 +840,9 @@ class Py2FLWebApp:
             <label>Key<input type="text" name="key" placeholder="Optional for degree input, example: A minor" value="{html.escape(state.get("key", ""))}"></label>
             <label>Genre<input type="text" name="genre" placeholder="Example: trap, rnb, house" value="{html.escape(state.get("genre", ""))}"></label>
             <label>Bars<input type="number" name="bars" min="1" max="128" placeholder="default: token count" value="{html.escape(state.get("bars", ""))}"></label>
+            {_select_field_html("Chord Density", "chord_density", state.get("chord_density", "auto"), [("auto", "Auto"), ("1", "1 per bar"), ("2", "2 per bar"), ("3", "3 per bar")])}
+            {_select_field_html("Melody Density", "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
+            {_select_field_html("Chord Rhythm", "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
             <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
@@ -1120,6 +1148,9 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
           <div class="meta-card"><span>Seed</span><strong>{html.escape(str(meta.get('candidate_seed')))}</strong></div>
           <div class="meta-card"><span>Tempo</span><strong>{html.escape(str(meta.get('tempo')))} BPM</strong></div>
           <div class="meta-card"><span>Key</span><strong>{html.escape(str(meta.get('key')))}</strong></div>
+          <div class="meta-card"><span>Chord Density</span><strong>{html.escape(str(meta.get('resolved_chord_density')))}</strong></div>
+          <div class="meta-card"><span>Melody Density</span><strong>{html.escape(str(meta.get('resolved_melody_density')))}</strong></div>
+          <div class="meta-card"><span>Chord Rhythm</span><strong>{html.escape(str(meta.get('resolved_chord_rhythm_style')))}</strong></div>
           <div class="meta-card"><span>Drums</span><strong>{html.escape(str(meta.get('drum_pattern')))}</strong></div>
           <div class="meta-card"><span>Bass</span><strong>{html.escape(str(meta.get('bass_pattern')))}</strong></div>
         </div>
@@ -1159,13 +1190,40 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
     percent = int(bar.get("matching_percent", 0) or 0)
     melody = ", ".join(str(value) for value in bar.get("representative_melody_pitches", [])) or "-"
     chord_tones = ", ".join(str(value) for value in bar.get("chord_tones", [])) or "-"
-    degree = bar.get("degree")
-    degree_text = f"Degree {degree}" if degree else "Degree -"
+    degree_label = str(bar.get("degree_label") or "-")
+    degree_text = f"Degree {degree_label}"
     start_tick = int(bar.get("start_tick") or 0)
     end_tick = int(bar.get("end_tick") or start_tick)
     bar_index = int(bar.get("bar_index") or 0)
     reroll_nonce = uuid.uuid4().int % 1_000_000
     recently_updated = bool(bar.get("recently_updated"))
+    chord_events = bar.get("chord_events", [])
+    if chord_events:
+        chip_parts = []
+        for event in chord_events:
+            tooltip = ", ".join(str(tone) for tone in event.get("chord_tones", [])) or "-"
+            degree_value = event.get("degree")
+            if degree_value:
+                tooltip = f"Degree {degree_value} | {tooltip}"
+            chip_parts.append(
+                f'<span class="chord-chip" title="{html.escape(tooltip)}">{html.escape(str(event.get("chord_name", "-")))}</span>'
+            )
+        chord_events_html = '<div class="chord-chip-row">' + ''.join(chip_parts) + '</div>'
+    else:
+        fallback_tooltip = chord_tones
+        if degree_label != '-':
+            fallback_tooltip = f"Degree {degree_label} | {fallback_tooltip}"
+        chord_events_html = f'<div class="chord-chip-row"><span class="chord-chip" title="{html.escape(fallback_tooltip)}">{html.escape(str(bar.get("chord_name", "No chord")))}</span></div>'
+    density_control_html = ''
+    if action_label == 'Reroll Harmony':
+        current_density = str(min(3, max(1, len(chord_events) or 1)))
+        density_control_html = _select_field_html(
+            'Density',
+            'bar_chord_density',
+            current_density,
+            [('1', '1 chord'), ('2', '2 chords'), ('3', '3 chords')],
+            css_class='bar-density-select',
+        )
     updated_pill = "<div class=\"updated-pill\">Recently Updated</div>" if recently_updated else ""
     return f"""
             <div class="bar-card {'recently-updated' if recently_updated else ''}" id="candidate-{candidate_index}-bar-{bar_index}" data-bar-card="{bar_index}" data-candidate-index="{candidate_index}">
@@ -1189,7 +1247,7 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
               <div class="match-pill">{percent}% match</div>
               {updated_pill}
               <div class="bar-meta">
-                <div><strong>Chord tones</strong> {html.escape(chord_tones)}</div>
+                {chord_events_html}
                 <div><strong>Melody focus</strong> {html.escape(melody)}</div>
               </div>
               <div class="bar-actions">
@@ -1199,6 +1257,7 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
                   <input type="hidden" name="candidate_index" value="{candidate_index}">
                   <input type="hidden" name="bar_index" value="{bar_index}">
                   <input type="hidden" name="reroll_nonce" value="{reroll_nonce}">
+                  {density_control_html}
                   <button type="submit" class="secondary bar-action-btn">{html.escape(action_label)}</button>
                 </form>
               </div>
@@ -1214,6 +1273,9 @@ def _state_from_request(request: GenerationRequest, count: int) -> dict[str, str
         "key": request.key or "",
         "genre": request.genre or "",
         "bars": "" if request.bars is None else str(request.bars),
+        "chord_density": request.chord_density or "auto",
+        "melody_density": request.melody_density or "auto",
+        "chord_rhythm_style": request.chord_rhythm_style or "auto",
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
         "melody_source": "" if request.melody_midi_path is None else str(request.melody_midi_path),
@@ -1228,6 +1290,9 @@ def _state_from_chords_request(request: GenerationRequest, count: int) -> dict[s
         "key": request.key or "",
         "genre": request.genre or "",
         "bars": "" if request.bars is None else str(request.bars),
+        "chord_density": request.chord_density or "auto",
+        "melody_density": request.melody_density or "auto",
+        "chord_rhythm_style": request.chord_rhythm_style or "auto",
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
     }
@@ -1241,6 +1306,9 @@ def _state_from_batch_chords(batch_meta: dict[str, object], count: int) -> dict[
         "key": _string_value(batch_meta.get("key")),
         "genre": _string_value(batch_meta.get("genre")),
         "bars": _string_value(batch_meta.get("bars")),
+        "chord_density": _string_value(batch_meta.get("chord_density")) or "auto",
+        "melody_density": _string_value(batch_meta.get("melody_density")) or "auto",
+        "chord_rhythm_style": _string_value(batch_meta.get("chord_rhythm_style")) or "auto",
         "seed": _string_value(batch_meta.get("seed")),
         "count": _string_value(batch_meta.get("candidate_count")) or str(count),
     }
@@ -1261,6 +1329,15 @@ def _hidden_state_fields(state: dict[str, str] | None) -> str:
     for key, value in state.items():
         parts.append(f'<input type="hidden" name="{html.escape(key)}" value="{html.escape(value)}">')
     return ''.join(parts)
+
+
+def _select_field_html(label: str, name: str, selected: str, options: list[tuple[str, str]], css_class: str = '') -> str:
+    option_html = ''.join(
+        f'<option value="{html.escape(value)}"{" selected" if value == selected else ""}>{html.escape(title)}</option>'
+        for value, title in options
+    )
+    class_attr = f' class="{html.escape(css_class)}"' if css_class else ''
+    return f'<label>{html.escape(label)}<select name="{html.escape(name)}"{class_attr}>{option_html}</select></label>'
 
 
 def _resolve_melody_path(form: cgi.FieldStorage, upload_root: Path) -> Path | None:
@@ -1307,6 +1384,20 @@ def _optional_int(value: str | None) -> int | None:
     if not value:
         return None
     return int(value)
+
+
+def _normalize_auto_option(value: str | None) -> str | None:
+    cleaned = _optional_text(value)
+    if cleaned in {None, 'auto'}:
+        return None
+    return cleaned
+
+
+def _normalize_bar_density_option(value: str | None) -> str | None:
+    cleaned = _optional_text(value)
+    if cleaned in {None, '1', '2', '3'}:
+        return cleaned
+    return None
 
 
 def _string_value(value: object) -> str:

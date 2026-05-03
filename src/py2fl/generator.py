@@ -9,8 +9,8 @@ import re
 from .arrangement import build_arrangement, build_arrangement_from_progression
 from .melody import analyze_melody_file
 from .midi import parse_midi_notes, write_meta, write_midi
-from .models import Arrangement, BAR_TICKS, GenerationRequest, GenerationResult, NoteEvent, TrackData
-from .music_theory import PITCH_CLASS_NAMES, key_label
+from .models import Arrangement, BAR_TICKS, GenerationRequest, GenerationResult, NoteEvent, PPQ, TrackData
+from .music_theory import PITCH_CLASS_NAMES, key_label, scale_for
 from .progression import ParsedProgression, parse_progression, progression_display
 from .text_analysis import analyze_text
 
@@ -61,6 +61,9 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 key=request.key,
                 genre=request.genre,
                 bars=request.bars,
+                chord_density=request.chord_density,
+                melody_density=request.melody_density,
+                chord_rhythm_style=request.chord_rhythm_style,
                 seed=base_seed,
                 output_dir=request.output_dir,
             ),
@@ -83,6 +86,9 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 key=request.key,
                 genre=request.genre,
                 bars=request.bars,
+                chord_density=request.chord_density,
+                melody_density=request.melody_density,
+                chord_rhythm_style=request.chord_rhythm_style,
                 seed=attempt_seed,
                 output_dir=request.output_dir,
             )
@@ -111,6 +117,9 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     progression_degrees=arrangement.progression_degrees,
                     drum_pattern=base_arrangement.drum_pattern,
                     bass_pattern=arrangement.bass_pattern,
+                    chord_density=arrangement.chord_density,
+                    melody_density=base_arrangement.melody_density,
+                    chord_rhythm_style=arrangement.chord_rhythm_style,
                 )
             elif reroll_scope == "melody":
                 arrangement = Arrangement(
@@ -127,6 +136,9 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     progression_degrees=base_arrangement.progression_degrees,
                     drum_pattern=base_arrangement.drum_pattern,
                     bass_pattern=base_arrangement.bass_pattern,
+                    chord_density=base_arrangement.chord_density,
+                    melody_density=arrangement.melody_density,
+                    chord_rhythm_style=base_arrangement.chord_rhythm_style,
                 )
         candidate_dir = batch_dir / f"option_{index + 1:02d}"
         result = _write_arrangement(
@@ -164,6 +176,9 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
         "tempo": request.tempo,
         "key": request.key,
         "bars": request.bars,
+        "chord_density": request.chord_density,
+        "melody_density": request.melody_density,
+        "chord_rhythm_style": request.chord_rhythm_style,
         "seed": request.seed,
         "candidate_count": len(results),
         "selected_option": selected_option,
@@ -182,6 +197,9 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
                 "drum_pattern": result.metadata.get("drum_pattern"),
                 "bass_pattern": result.metadata.get("bass_pattern"),
                 "style_tags": result.metadata.get("style_tags"),
+                "resolved_chord_density": result.metadata.get("resolved_chord_density"),
+                "resolved_melody_density": result.metadata.get("resolved_melody_density"),
+                "resolved_chord_rhythm_style": result.metadata.get("resolved_chord_rhythm_style"),
                 "preview_file": "full_arrangement.mid",
                 "bars": result.metadata.get("bars"),
             }
@@ -200,7 +218,7 @@ def load_batch_meta(batch_dir: Path) -> dict[str, object]:
     return json.loads(meta_path.read_text(encoding="utf-8"))
 
 
-def reroll_candidate_bar(batch_dir: Path, candidate_index: int, bar_index: int, reroll_nonce: int = 0) -> dict[str, object]:
+def reroll_candidate_bar(batch_dir: Path, candidate_index: int, bar_index: int, reroll_nonce: int = 0, chord_density_override: str | None = None) -> dict[str, object]:
     batch_dir = Path(batch_dir)
     batch_meta = load_batch_meta(batch_dir)
     candidates = batch_meta.get("candidates", [])
@@ -222,7 +240,7 @@ def reroll_candidate_bar(batch_dir: Path, candidate_index: int, bar_index: int, 
     if metadata.get("input_mode") in {"chords", "text+chords"}:
         batch_meta = _reroll_melody_bar(batch_dir, selected, metadata, bar_index, reroll_nonce)
     else:
-        batch_meta = _reroll_harmony_bar(batch_dir, selected, metadata, bar_index, reroll_nonce)
+        batch_meta = _reroll_harmony_bar(batch_dir, selected, metadata, bar_index, reroll_nonce, chord_density_override=chord_density_override)
     return batch_meta
 
 
@@ -270,6 +288,9 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
             progression=parsed_progression,
             text_features=context["text_features"],
             tempo=request.tempo,
+            chord_density=request.chord_density,
+            melody_density=request.melody_density,
+            chord_rhythm_style=request.chord_rhythm_style,
             seed=request.seed,
         )
         return arrangement, parsed_progression
@@ -279,6 +300,9 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
         tempo=request.tempo,
         key=request.key,
         bars=request.bars,
+        chord_density=request.chord_density,
+        melody_density=request.melody_density,
+        chord_rhythm_style=request.chord_rhythm_style,
         seed=request.seed,
     )
     return arrangement, None
@@ -331,6 +355,12 @@ def _write_arrangement(
         "melody_aligned_to_start": melody_analysis is not None,
         "text": request.text,
         "genre": request.genre,
+        "requested_chord_density": request.chord_density or "auto",
+        "requested_melody_density": request.melody_density or "auto",
+        "requested_chord_rhythm_style": request.chord_rhythm_style or "auto",
+        "resolved_chord_density": arrangement.chord_density,
+        "resolved_melody_density": arrangement.melody_density,
+        "resolved_chord_rhythm_style": arrangement.chord_rhythm_style,
         "files": [file.name for file in files],
         "progression_label": arrangement.progression_label,
         "progression_degrees": arrangement.progression_degrees,
@@ -397,21 +427,28 @@ def _build_bar_summary(arrangement: Arrangement) -> list[dict[str, object]]:
         bar_end = bar_start + BAR_TICKS
         chord_notes = _notes_for_span(arrangement.chords, bar_start, bar_end)
         melody_notes = _notes_for_span(arrangement.melody, bar_start, bar_end)
-        chord_name = _detect_chord_name(chord_notes)
+        chord_events = _chord_events_for_span(chord_notes, bar_start, bar_end, arrangement.key, arrangement.mode)
+        event_names = _unique_event_names(chord_events)
+        event_degrees = _unique_event_degrees(chord_events)
+        chord_name = ' / '.join(event_names) if len(event_names) > 1 else (event_names[0] if event_names else 'No chord')
         chord_tones = _sorted_pitch_class_names(chord_notes)
         representative = _representative_melody_pitches(melody_notes)
         match_ratio = _match_ratio(melody_notes, chord_notes)
         summary.append(
             {
-                "bar_index": bar_index + 1,
-                "start_tick": bar_start,
-                "end_tick": bar_end,
-                "degree": arrangement.progression_degrees[bar_index] if bar_index < len(arrangement.progression_degrees) else None,
-                "chord_name": chord_name,
-                "chord_tones": chord_tones,
-                "representative_melody_pitches": representative,
-                "matching_ratio": match_ratio,
-                "matching_percent": round(match_ratio * 100),
+                'bar_index': bar_index + 1,
+                'start_tick': bar_start,
+                'end_tick': bar_end,
+                'degree': arrangement.progression_degrees[bar_index] if bar_index < len(arrangement.progression_degrees) else None,
+                'degrees': event_degrees,
+                'degree_label': ' / '.join(str(value) for value in event_degrees) if event_degrees else (str(arrangement.progression_degrees[bar_index]) if bar_index < len(arrangement.progression_degrees) and arrangement.progression_degrees[bar_index] else '-'),
+                'chord_name': chord_name,
+                'chord_tones': chord_tones,
+                'representative_melody_pitches': representative,
+                'matching_ratio': match_ratio,
+                'matching_percent': round(match_ratio * 100),
+                'chord_event_count': len(chord_events),
+                'chord_events': chord_events,
             }
         )
     return summary
@@ -419,6 +456,84 @@ def _build_bar_summary(arrangement: Arrangement) -> list[dict[str, object]]:
 
 def _notes_for_span(notes: list[NoteEvent], start_tick: int, end_tick: int) -> list[NoteEvent]:
     return [note for note in notes if note.start < end_tick and note.end > start_tick]
+
+
+def _chord_events_for_span(notes: list[NoteEvent], start_tick: int, end_tick: int, key: str, mode: str) -> list[dict[str, object]]:
+    sorted_notes = sorted(notes, key=lambda note: (note.start, note.pitch))
+    if not sorted_notes:
+        return []
+    events: list[dict[str, object]] = []
+    cluster: list[NoteEvent] = []
+    cluster_start = 0
+    cluster_end = 0
+    merge_window = PPQ // 8
+
+    def flush_cluster(active_cluster: list[NoteEvent], active_start: int, active_end: int) -> None:
+        if not active_cluster:
+            return
+        events.append({
+            'start_tick': active_start,
+            'end_tick': min(active_end, end_tick),
+            'degree': _degree_for_notes(active_cluster, key, mode),
+            'chord_name': _detect_chord_name(active_cluster),
+            'chord_tones': _sorted_pitch_class_names(active_cluster),
+        })
+
+    for note in sorted_notes:
+        if not cluster:
+            cluster = [note]
+            cluster_start = note.start
+            cluster_end = note.end
+            continue
+        same_event = note.start <= cluster_start + merge_window or note.start < cluster_end
+        if same_event:
+            cluster.append(note)
+            cluster_end = max(cluster_end, note.end)
+            continue
+        flush_cluster(cluster, cluster_start, cluster_end)
+        cluster = [note]
+        cluster_start = note.start
+        cluster_end = note.end
+
+    flush_cluster(cluster, cluster_start, cluster_end)
+    return events
+
+
+def _unique_event_names(chord_events: list[dict[str, object]]) -> list[str]:
+    unique: list[str] = []
+    for event in chord_events:
+        name = str(event.get('chord_name') or 'No chord')
+        if not unique or unique[-1] != name:
+            unique.append(name)
+    return unique
+
+
+def _unique_event_degrees(chord_events: list[dict[str, object]]) -> list[int]:
+    unique: list[int] = []
+    for event in chord_events:
+        degree = event.get('degree')
+        if isinstance(degree, int) and (not unique or unique[-1] != degree):
+            unique.append(degree)
+    return unique
+
+
+def _degree_for_notes(notes: list[NoteEvent], key: str, mode: str) -> int | None:
+    if not notes:
+        return None
+    scale = scale_for(key, mode)
+    root_pc = min(notes, key=lambda note: note.pitch).pitch % 12
+    if root_pc not in scale:
+        return None
+    return scale.index(root_pc) + 1
+
+
+def _unique_event_names(chord_events: list[dict[str, object]]) -> list[str]:
+    unique: list[str] = []
+    for event in chord_events:
+        name = str(event.get('chord_name') or 'No chord')
+        if not unique or unique[-1] != name:
+            unique.append(name)
+    return unique
 
 
 def _detect_chord_name(notes: list[NoteEvent]) -> str:
@@ -494,6 +609,9 @@ def _read_existing_arrangement(output_dir: Path, metadata: dict[str, object]) ->
         progression_degrees=list(metadata.get("progression_degrees") or []),
         drum_pattern=str(metadata.get("drum_pattern") or ""),
         bass_pattern=str(metadata.get("bass_pattern") or ""),
+        chord_density=int(metadata.get("resolved_chord_density") or 1),
+        melody_density=str(metadata.get("resolved_melody_density") or "normal"),
+        chord_rhythm_style=str(metadata.get("resolved_chord_rhythm_style") or "hold"),
     )
 
 
@@ -532,7 +650,7 @@ def _key_name_from_label(label: str | None) -> str | None:
     return _split_key_label(label)[0]
 
 
-def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: dict[str, object], bar_index: int, reroll_nonce: int) -> dict[str, object]:
+def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: dict[str, object], bar_index: int, reroll_nonce: int, chord_density_override: str | None = None) -> dict[str, object]:
     request = GenerationRequest(
         text=_optional_string(load_batch_meta(batch_dir).get("text")),
         melody_midi_path=Path(str(load_batch_meta(batch_dir).get("source_melody"))) if load_batch_meta(batch_dir).get("source_melody") else None,
@@ -540,6 +658,9 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         key=_key_name_from_label(_optional_string(metadata.get("key"))),
         genre=_optional_string(load_batch_meta(batch_dir).get("genre")),
         bars=int(metadata.get("bars") or 4),
+        chord_density=chord_density_override or _optional_string(load_batch_meta(batch_dir).get("chord_density")) or _optional_string(metadata.get("requested_chord_density")),
+        melody_density=_optional_string(load_batch_meta(batch_dir).get("melody_density")) or _optional_string(metadata.get("requested_melody_density")),
+        chord_rhythm_style=_optional_string(load_batch_meta(batch_dir).get("chord_rhythm_style")) or _optional_string(metadata.get("requested_chord_rhythm_style")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -558,6 +679,9 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
             key=request.key,
             genre=request.genre,
             bars=request.bars,
+            chord_density=request.chord_density,
+            melody_density=request.melody_density,
+            chord_rhythm_style=request.chord_rhythm_style,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -585,6 +709,9 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         progression_degrees=_replace_progression_degree(list(metadata.get("progression_degrees") or current.progression_degrees), replacement.progression_degrees, bar_index),
         drum_pattern=current.drum_pattern,
         bass_pattern=str(metadata.get("bass_pattern") or current.bass_pattern),
+        chord_density=current.chord_density,
+        melody_density=current.melody_density,
+        chord_rhythm_style=current.chord_rhythm_style,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -608,6 +735,9 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         key=_key_name_from_label(_optional_string(metadata.get("key"))),
         genre=_optional_string(batch_meta.get("genre")),
         bars=int(metadata.get("bars") or 4),
+        chord_density=_optional_string(batch_meta.get("chord_density")) or _optional_string(metadata.get("requested_chord_density")),
+        melody_density=_optional_string(batch_meta.get("melody_density")) or _optional_string(metadata.get("requested_melody_density")),
+        chord_rhythm_style=_optional_string(batch_meta.get("chord_rhythm_style")) or _optional_string(metadata.get("requested_chord_rhythm_style")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -626,6 +756,9 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
             key=request.key,
             genre=request.genre,
             bars=request.bars,
+            chord_density=request.chord_density,
+            melody_density=request.melody_density,
+            chord_rhythm_style=request.chord_rhythm_style,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -651,6 +784,9 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         progression_degrees=list(metadata.get("progression_degrees") or current.progression_degrees),
         drum_pattern=current.drum_pattern,
         bass_pattern=current.bass_pattern,
+        chord_density=current.chord_density,
+        melody_density=current.melody_density,
+        chord_rhythm_style=current.chord_rhythm_style,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -707,5 +843,8 @@ def _refresh_batch_candidate(batch_meta: dict[str, object], result: GenerationRe
             candidate["drum_pattern"] = result.metadata.get("drum_pattern")
             candidate["bass_pattern"] = result.metadata.get("bass_pattern")
             candidate["style_tags"] = result.metadata.get("style_tags")
+            candidate["resolved_chord_density"] = result.metadata.get("resolved_chord_density")
+            candidate["resolved_melody_density"] = result.metadata.get("resolved_melody_density")
+            candidate["resolved_chord_rhythm_style"] = result.metadata.get("resolved_chord_rhythm_style")
             candidate["bars"] = result.metadata.get("bars")
             break
