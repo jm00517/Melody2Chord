@@ -397,3 +397,56 @@ def test_web_chord_page_renders(tmp_path: Path) -> None:
     assert "Chord In. Melody Out." in body
     assert "Generate Melodies" in body
     assert "1-5-6-4" in body
+
+
+def test_humanize_off_is_a_noop(tmp_path: Path) -> None:
+    explicit = generate_song(
+        GenerationRequest(text="dreamy rnb night drive", bars=4, seed=42, humanize="off", output_dir=tmp_path / "explicit")
+    )
+    default = generate_song(
+        GenerationRequest(text="dreamy rnb night drive", bars=4, seed=42, output_dir=tmp_path / "default")
+    )
+    explicit_tracks, _ = parse_midi_notes(explicit.output_dir / "melody.mid")
+    default_tracks, _ = parse_midi_notes(default.output_dir / "melody.mid")
+    explicit_notes = [(n.pitch, n.start, n.duration, n.velocity) for n in next(track for track in explicit_tracks if track.notes).notes]
+    default_notes = [(n.pitch, n.start, n.duration, n.velocity) for n in next(track for track in default_tracks if track.notes).notes]
+    assert explicit_notes == default_notes, "humanize=off must be identical to leaving humanize unset"
+    assert explicit.metadata["resolved_humanize"] == "off"
+
+
+def test_humanize_high_introduces_timing_and_velocity_jitter(tmp_path: Path) -> None:
+    base = generate_song(
+        GenerationRequest(text="dreamy rnb night drive", bars=8, seed=42, humanize="off", output_dir=tmp_path / "off")
+    )
+    jittered = generate_song(
+        GenerationRequest(text="dreamy rnb night drive", bars=8, seed=42, humanize="high", output_dir=tmp_path / "high")
+    )
+
+    base_chords = sorted([(n.start, n.velocity) for n in (track for track in parse_midi_notes(base.output_dir / "chords.mid")[0] if track.notes).__next__().notes])
+    jittered_chords = sorted([(n.start, n.velocity) for n in (track for track in parse_midi_notes(jittered.output_dir / "chords.mid")[0] if track.notes).__next__().notes])
+
+    base_starts = {start for start, _ in base_chords}
+    jittered_starts = {start for start, _ in jittered_chords}
+    assert base_starts != jittered_starts, "humanize=high must shift at least some notes off the original grid"
+
+    base_velocities = {vel for _, vel in base_chords}
+    jittered_velocities = {vel for _, vel in jittered_chords}
+    assert max(jittered_velocities) - min(jittered_velocities) > max(base_velocities) - min(base_velocities), \
+        "humanize=high must widen the velocity spread"
+    assert jittered.metadata["resolved_humanize"] == "high"
+
+
+def test_humanize_is_deterministic_per_seed(tmp_path: Path) -> None:
+    first = generate_song(
+        GenerationRequest(text="dreamy rnb night drive", bars=4, seed=99, humanize="med", output_dir=tmp_path / "first")
+    )
+    second = generate_song(
+        GenerationRequest(text="dreamy rnb night drive", bars=4, seed=99, humanize="med", output_dir=tmp_path / "second")
+    )
+    first_tracks, _ = parse_midi_notes(first.output_dir / "melody.mid")
+    second_tracks, _ = parse_midi_notes(second.output_dir / "melody.mid")
+    first_notes = next(track for track in first_tracks if track.notes).notes
+    second_notes = next(track for track in second_tracks if track.notes).notes
+    first_sig = [(n.pitch, n.start, n.duration, n.velocity) for n in first_notes]
+    second_sig = [(n.pitch, n.start, n.duration, n.velocity) for n in second_notes]
+    assert first_sig == second_sig

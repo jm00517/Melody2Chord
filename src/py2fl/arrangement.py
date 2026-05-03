@@ -126,14 +126,27 @@ class ResolvedGenerationControls:
     chord_density: int
     melody_density: str
     chord_rhythm_style: str
+    humanize: str
 
 
 ALLOWED_CHORD_DENSITIES = {"1", "2", "3"}
 ALLOWED_MELODY_DENSITIES = {"sparse", "normal", "dense", "xdense"}
 ALLOWED_CHORD_RHYTHMS = {"hold", "stab", "strum"}
+ALLOWED_HUMANIZE = {"off", "low", "med", "high"}
+
+HUMANIZE_INTENSITY = {
+    "off": 0.0,
+    "low": 0.30,
+    "med": 0.60,
+    "high": 1.0,
+}
+
+# Base maximum offsets at intensity=1.0
+HUMANIZE_TIMING_TICKS_MAX = 12
+HUMANIZE_VELOCITY_MAX = 18
 
 
-def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None, tempo: int | None, key: str | None, bars: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, seed: int | None) -> Arrangement:
+def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None, tempo: int | None, key: str | None, bars: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, seed: int | None) -> Arrangement:
     randomizer = random.Random(seed)
     resolved_mode = _resolve_mode(text_features, melody_analysis)
     resolved_key = normalize_key_name(key or (melody_analysis.key if melody_analysis else _default_key_for(text_features, resolved_mode)))
@@ -144,6 +157,7 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
         chord_density=chord_density,
         melody_density=melody_density,
         chord_rhythm_style=chord_rhythm_style,
+        humanize=humanize,
         text_features=text_features,
         has_source_melody=melody_analysis is not None,
         randomizer=randomizer,
@@ -159,6 +173,12 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
 
     bass, bass_pattern = _generate_bassline(chords, text_features, randomizer)
     drums, drum_pattern = _generate_drum_pattern(resolved_bars, text_features, randomizer)
+
+    melody = _humanize_notes(melody, randomizer, intensity_label=controls.humanize)
+    chords = _humanize_notes(chords, randomizer, intensity_label=controls.humanize)
+    bass = _humanize_notes(bass, randomizer, intensity_label=controls.humanize)
+    drums = _humanize_notes(drums, randomizer, intensity_label=controls.humanize)
+
     return Arrangement(
         melody=melody,
         chords=chords,
@@ -176,10 +196,11 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
         chord_density=controls.chord_density,
         melody_density=controls.melody_density,
         chord_rhythm_style=controls.chord_rhythm_style,
+        humanize=controls.humanize,
     )
 
 
-def build_arrangement_from_progression(*, progression: ParsedProgression, text_features: TextFeatures | None, tempo: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, seed: int | None) -> Arrangement:
+def build_arrangement_from_progression(*, progression: ParsedProgression, text_features: TextFeatures | None, tempo: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, seed: int | None) -> Arrangement:
     randomizer = random.Random(seed)
     resolved_tempo = tempo or _default_tempo_for(text_features)
     style_tags = list(text_features.style_tags) if text_features else []
@@ -187,6 +208,7 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
         chord_density=chord_density,
         melody_density=melody_density,
         chord_rhythm_style=chord_rhythm_style,
+        humanize=humanize,
         text_features=text_features,
         has_source_melody=False,
         randomizer=randomizer,
@@ -195,6 +217,12 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
     melody = _generate_melody_from_progression(progression, text_features, controls.melody_density, randomizer)
     bass, bass_pattern = _generate_bassline(chords, text_features, randomizer)
     drums, drum_pattern = _generate_drum_pattern(progression.bars, text_features, randomizer)
+
+    melody = _humanize_notes(melody, randomizer, intensity_label=controls.humanize)
+    chords = _humanize_notes(chords, randomizer, intensity_label=controls.humanize)
+    bass = _humanize_notes(bass, randomizer, intensity_label=controls.humanize)
+    drums = _humanize_notes(drums, randomizer, intensity_label=controls.humanize)
+
     degrees = [bar.degree for bar in progression.chord_bars]
     preview = '-'.join(bar.source_token for bar in progression.chord_bars[:4])
     label = f'ChordLine {preview}' if preview else 'ChordLine'
@@ -215,6 +243,7 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
         chord_density=controls.chord_density,
         melody_density=controls.melody_density,
         chord_rhythm_style=controls.chord_rhythm_style,
+        humanize=controls.humanize,
     )
 
 
@@ -240,11 +269,12 @@ def _default_tempo_for(text_features: TextFeatures | None) -> int:
     return 110
 
 
-def _resolve_generation_controls(*, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, text_features: TextFeatures | None, has_source_melody: bool, randomizer: random.Random) -> ResolvedGenerationControls:
+def _resolve_generation_controls(*, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, text_features: TextFeatures | None, has_source_melody: bool, randomizer: random.Random) -> ResolvedGenerationControls:
     return ResolvedGenerationControls(
         chord_density=_resolve_chord_density(chord_density, text_features, has_source_melody, randomizer),
         melody_density=_resolve_melody_density(melody_density, text_features, has_source_melody, randomizer),
         chord_rhythm_style=_resolve_chord_rhythm_style(chord_rhythm_style, text_features, randomizer),
+        humanize=_resolve_humanize(humanize, text_features),
     )
 
 
@@ -287,6 +317,26 @@ def _resolve_chord_rhythm_style(value: str | None, text_features: TextFeatures |
     if genre in {'trap', 'house'}:
         return randomizer.choice(['stab', 'strum'])
     return randomizer.choice(['hold', 'strum'])
+
+
+def _resolve_humanize(value: str | None, text_features: TextFeatures | None) -> str:
+    if value in ALLOWED_HUMANIZE:
+        return value
+    if value != 'auto':
+        return 'off'
+    if text_features is None:
+        return 'low'
+    genre = (text_features.genre or 'pop').lower()
+    mood = (text_features.mood or '').lower()
+    energy = (text_features.energy or '').lower()
+    style_tokens = {tag.lower() for tag in (text_features.style_tags or [])}
+    if 'jazzy' in style_tokens or 'lofi' in style_tokens or genre == 'rnb':
+        return 'high'
+    if genre == 'ambient' or mood in {'dreamy', 'mellow'} or energy == 'low':
+        return 'med'
+    if genre in {'trap', 'house'} or 'tight' in style_tokens:
+        return 'low'
+    return 'low'
 
 
 def _pick_progression_variant(mode: str, text_features: TextFeatures | None, randomizer: random.Random) -> tuple[str, list[int]]:
@@ -813,3 +863,59 @@ def _generate_drum_pattern(bars: int, text_features: TextFeatures | None, random
             start = int(bar_start + step * quarter)
             notes.append(NoteEvent(pitch=44, start=start, duration=max(quarter // 4, 1), velocity=54, channel=9))
     return sorted(notes, key=lambda note: (note.start, note.pitch)), pattern_name
+
+
+def _humanize_notes(notes: list[NoteEvent], randomizer: random.Random, *, intensity_label: str) -> list[NoteEvent]:
+    intensity = HUMANIZE_INTENSITY.get(intensity_label, 0.0)
+    if intensity <= 0.0 or not notes:
+        return notes
+    timing_max_base = max(1, int(round(HUMANIZE_TIMING_TICKS_MAX * intensity)))
+    velocity_max_base = max(1, int(round(HUMANIZE_VELOCITY_MAX * intensity)))
+
+    def _per_note_timing_scale(note: NoteEvent) -> float:
+        if note.channel == 9:
+            if note.pitch == 36:
+                return 0.25
+            if note.pitch in {42, 44, 46}:
+                return 1.3
+            return 0.7
+        return 1.0
+
+    def _per_note_velocity_scale(note: NoteEvent) -> float:
+        if note.channel == 9 and note.pitch == 36:
+            return 0.6
+        return 1.0
+
+    chord_offsets: dict[int, int] = {}
+    humanized: list[NoteEvent] = []
+    for note in notes:
+        timing_scale = _per_note_timing_scale(note)
+        if (note.start % BAR_TICKS) == 0:
+            timing_scale *= 0.5
+        max_offset = max(1, int(round(timing_max_base * timing_scale)))
+        if note.channel == 1:
+            timing_offset = chord_offsets.get(note.start)
+            if timing_offset is None:
+                sigma = max(1.0, max_offset / 2.0)
+                timing_offset = int(round(randomizer.gauss(0.0, sigma)))
+                timing_offset = max(-max_offset, min(max_offset, timing_offset))
+                chord_offsets[note.start] = timing_offset
+        else:
+            sigma = max(1.0, max_offset / 2.0)
+            timing_offset = int(round(randomizer.gauss(0.0, sigma)))
+            timing_offset = max(-max_offset, min(max_offset, timing_offset))
+
+        velocity_scale = _per_note_velocity_scale(note)
+        v_max = max(1, int(round(velocity_max_base * velocity_scale)))
+        velocity_delta = randomizer.randint(-v_max, v_max)
+
+        new_start = max(0, note.start + timing_offset)
+        new_velocity = max(1, min(127, note.velocity + velocity_delta))
+        humanized.append(NoteEvent(
+            pitch=note.pitch,
+            start=new_start,
+            duration=note.duration,
+            velocity=new_velocity,
+            channel=note.channel,
+        ))
+    return sorted(humanized, key=lambda note: (note.start, note.pitch))

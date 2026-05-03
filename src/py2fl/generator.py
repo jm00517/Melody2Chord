@@ -64,6 +64,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 chord_density=request.chord_density,
                 melody_density=request.melody_density,
                 chord_rhythm_style=request.chord_rhythm_style,
+                humanize=request.humanize,
                 seed=base_seed,
                 output_dir=request.output_dir,
             ),
@@ -89,6 +90,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 chord_density=request.chord_density,
                 melody_density=request.melody_density,
                 chord_rhythm_style=request.chord_rhythm_style,
+                humanize=request.humanize,
                 seed=attempt_seed,
                 output_dir=request.output_dir,
             )
@@ -120,6 +122,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     chord_density=arrangement.chord_density,
                     melody_density=base_arrangement.melody_density,
                     chord_rhythm_style=arrangement.chord_rhythm_style,
+                    humanize=arrangement.humanize,
                 )
             elif reroll_scope == "melody":
                 arrangement = Arrangement(
@@ -139,6 +142,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     chord_density=base_arrangement.chord_density,
                     melody_density=arrangement.melody_density,
                     chord_rhythm_style=base_arrangement.chord_rhythm_style,
+                    humanize=arrangement.humanize,
                 )
         candidate_dir = batch_dir / f"option_{index + 1:02d}"
         result = _write_arrangement(
@@ -179,6 +183,7 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
         "chord_density": request.chord_density,
         "melody_density": request.melody_density,
         "chord_rhythm_style": request.chord_rhythm_style,
+        "humanize": request.humanize,
         "seed": request.seed,
         "candidate_count": len(results),
         "selected_option": selected_option,
@@ -200,6 +205,7 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
                 "resolved_chord_density": result.metadata.get("resolved_chord_density"),
                 "resolved_melody_density": result.metadata.get("resolved_melody_density"),
                 "resolved_chord_rhythm_style": result.metadata.get("resolved_chord_rhythm_style"),
+                "resolved_humanize": result.metadata.get("resolved_humanize"),
                 "preview_file": "full_arrangement.mid",
                 "bars": result.metadata.get("bars"),
             }
@@ -291,6 +297,7 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
             chord_density=request.chord_density,
             melody_density=request.melody_density,
             chord_rhythm_style=request.chord_rhythm_style,
+            humanize=request.humanize,
             seed=request.seed,
         )
         return arrangement, parsed_progression
@@ -303,6 +310,7 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
         chord_density=request.chord_density,
         melody_density=request.melody_density,
         chord_rhythm_style=request.chord_rhythm_style,
+        humanize=request.humanize,
         seed=request.seed,
     )
     return arrangement, None
@@ -358,9 +366,11 @@ def _write_arrangement(
         "requested_chord_density": request.chord_density or "auto",
         "requested_melody_density": request.melody_density or "auto",
         "requested_chord_rhythm_style": request.chord_rhythm_style or "auto",
+        "requested_humanize": request.humanize or "off",
         "resolved_chord_density": arrangement.chord_density,
         "resolved_melody_density": arrangement.melody_density,
         "resolved_chord_rhythm_style": arrangement.chord_rhythm_style,
+        "resolved_humanize": arrangement.humanize,
         "files": [file.name for file in files],
         "progression_label": arrangement.progression_label,
         "progression_degrees": arrangement.progression_degrees,
@@ -612,6 +622,7 @@ def _read_existing_arrangement(output_dir: Path, metadata: dict[str, object]) ->
         chord_density=int(metadata.get("resolved_chord_density") or 1),
         melody_density=str(metadata.get("resolved_melody_density") or "normal"),
         chord_rhythm_style=str(metadata.get("resolved_chord_rhythm_style") or "hold"),
+        humanize=str(metadata.get("resolved_humanize") or "off"),
     )
 
 
@@ -661,6 +672,7 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         chord_density=chord_density_override or _optional_string(load_batch_meta(batch_dir).get("chord_density")) or _optional_string(metadata.get("requested_chord_density")),
         melody_density=_optional_string(load_batch_meta(batch_dir).get("melody_density")) or _optional_string(metadata.get("requested_melody_density")),
         chord_rhythm_style=_optional_string(load_batch_meta(batch_dir).get("chord_rhythm_style")) or _optional_string(metadata.get("requested_chord_rhythm_style")),
+        humanize=_optional_string(load_batch_meta(batch_dir).get("humanize")) or _optional_string(metadata.get("requested_humanize")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -682,6 +694,7 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
             chord_density=request.chord_density,
             melody_density=request.melody_density,
             chord_rhythm_style=request.chord_rhythm_style,
+            humanize=request.humanize,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -712,6 +725,7 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         chord_density=current.chord_density,
         melody_density=current.melody_density,
         chord_rhythm_style=current.chord_rhythm_style,
+        humanize=current.humanize,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -738,6 +752,7 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         chord_density=_optional_string(batch_meta.get("chord_density")) or _optional_string(metadata.get("requested_chord_density")),
         melody_density=_optional_string(batch_meta.get("melody_density")) or _optional_string(metadata.get("requested_melody_density")),
         chord_rhythm_style=_optional_string(batch_meta.get("chord_rhythm_style")) or _optional_string(metadata.get("requested_chord_rhythm_style")),
+        humanize=_optional_string(batch_meta.get("humanize")) or _optional_string(metadata.get("requested_humanize")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -759,6 +774,7 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
             chord_density=request.chord_density,
             melody_density=request.melody_density,
             chord_rhythm_style=request.chord_rhythm_style,
+            humanize=request.humanize,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -787,6 +803,7 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         chord_density=current.chord_density,
         melody_density=current.melody_density,
         chord_rhythm_style=current.chord_rhythm_style,
+        humanize=current.humanize,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -846,5 +863,6 @@ def _refresh_batch_candidate(batch_meta: dict[str, object], result: GenerationRe
             candidate["resolved_chord_density"] = result.metadata.get("resolved_chord_density")
             candidate["resolved_melody_density"] = result.metadata.get("resolved_melody_density")
             candidate["resolved_chord_rhythm_style"] = result.metadata.get("resolved_chord_rhythm_style")
+            candidate["resolved_humanize"] = result.metadata.get("resolved_humanize")
             candidate["bars"] = result.metadata.get("bars")
             break
