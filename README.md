@@ -25,6 +25,27 @@ For Korean documentation, see [READMEKR.md](READMEKR.md).
 - Visual harmony timeline with chord names, melody focus notes, and match percentage
 - Separate part exports plus a combined arrangement export
 
+### Musical realism controls (opt-in)
+
+All controls accept `off / low / med / high / auto` and default to `off`, so
+existing seeds reproduce bit-for-bit unless you explicitly turn them on.
+
+- **Humanize** — gaussian timing jitter and per-note velocity variation, with
+  separate scaling for kick / snare / hi-hat and shared offsets across stacked
+  chord notes
+- **Swing** — pushes notes that land on the off-half of an 8th-note pair later
+  in time; applied to melody, chords, and drum hi-hats only
+- **Drum dynamics** — adds a hi-hat accent curve, randomized snare ghost notes,
+  extra off-beat hats, and a 2-4 hit fill at the end of every 4-bar phrase
+- **Harmony spice** — swaps some diatonic chord events for the secondary
+  dominant of the next chord or for a borrowed chord from the parallel mode
+  (bVII / bVI in major, IV in minor)
+- **Section dynamics** — splits the bars into verse and chorus regions; chorus
+  bars get melody +1 octave with louder velocity, lifted chord/drum volume,
+  and a sub-octave bass; high setting on >=16 bars gives an A-B-A-B layout
+- **Modulate** — when bars >= 16, transposes the last quarter of the melody,
+  chord, and bass tracks up by 2 (low/med) or 5 (high) semitones
+
 ## Output Files
 
 Each generated candidate folder contains:
@@ -87,6 +108,15 @@ Options:
 - `--key`: key override such as `C`, `F#`, `A minor`
 - `--genre`: genre hint such as `trap`, `rnb`, `house`
 - `--bars`: number of bars
+- `--chord-density {1,2,3,auto}`: chords per bar
+- `--melody-density {sparse,normal,dense,xdense,auto}`: melody note density
+- `--chord-rhythm-style {hold,stab,strum,auto}`: chord playback style
+- `--humanize {off,low,med,high,auto}`: timing + velocity jitter (default `off`)
+- `--swing {off,low,med,high,auto}`: 8th-note swing feel (default `off`)
+- `--drum-dynamics {off,low,med,high,auto}`: accent curve, ghost notes, fills (default `off`)
+- `--harmony-spice {off,low,med,high,auto}`: secondary dominants and borrowed chords (default `off`)
+- `--section-dynamics {off,low,med,high,auto}`: verse/chorus contrast (default `off`)
+- `--modulate {off,low,med,high,auto}`: transpose final 1/4 of the track when bars >= 16 (default `off`)
 - `--seed`: random seed for reproducible output
 - `--count`: number of candidates to generate
 - `--out`: base output directory
@@ -105,6 +135,7 @@ py2fl generate --melody-midi ./idea.mid --tempo 100 --out ./exports
 py2fl generate --text "dreamy rnb night drive" --melody-midi ./topline.mid --seed 3 --out ./exports
 py2fl generate --text "dreamy rnb night drive" --count 4 --out ./exports
 py2fl generate --progression "1-5-6-4" --text "dreamy rnb topline" --count 4 --out ./exports
+py2fl generate --text "epic lift anthem" --bars 16 --humanize med --swing low --drum-dynamics high --harmony-spice med --section-dynamics high --modulate med --seed 42 --out ./exports
 ```
 
 ### Serve the web UI
