@@ -67,6 +67,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 humanize=request.humanize,
                 swing=request.swing,
                 drum_dynamics=request.drum_dynamics,
+                harmony_spice=request.harmony_spice,
                 seed=base_seed,
                 output_dir=request.output_dir,
             ),
@@ -95,6 +96,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 humanize=request.humanize,
                 swing=request.swing,
                 drum_dynamics=request.drum_dynamics,
+                harmony_spice=request.harmony_spice,
                 seed=attempt_seed,
                 output_dir=request.output_dir,
             )
@@ -129,6 +131,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     humanize=arrangement.humanize,
                     swing=arrangement.swing,
                     drum_dynamics=arrangement.drum_dynamics,
+                    harmony_spice=arrangement.harmony_spice,
                 )
             elif reroll_scope == "melody":
                 arrangement = Arrangement(
@@ -151,6 +154,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     humanize=arrangement.humanize,
                     swing=arrangement.swing,
                     drum_dynamics=arrangement.drum_dynamics,
+                    harmony_spice=arrangement.harmony_spice,
                 )
         candidate_dir = batch_dir / f"option_{index + 1:02d}"
         result = _write_arrangement(
@@ -194,6 +198,7 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
         "humanize": request.humanize,
         "swing": request.swing,
         "drum_dynamics": request.drum_dynamics,
+        "harmony_spice": request.harmony_spice,
         "seed": request.seed,
         "candidate_count": len(results),
         "selected_option": selected_option,
@@ -218,6 +223,7 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
                 "resolved_humanize": result.metadata.get("resolved_humanize"),
                 "resolved_swing": result.metadata.get("resolved_swing"),
                 "resolved_drum_dynamics": result.metadata.get("resolved_drum_dynamics"),
+                "resolved_harmony_spice": result.metadata.get("resolved_harmony_spice"),
                 "preview_file": "full_arrangement.mid",
                 "bars": result.metadata.get("bars"),
             }
@@ -312,6 +318,7 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
             humanize=request.humanize,
             swing=request.swing,
             drum_dynamics=request.drum_dynamics,
+            harmony_spice=request.harmony_spice,
             seed=request.seed,
         )
         return arrangement, parsed_progression
@@ -327,6 +334,7 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
         humanize=request.humanize,
         swing=request.swing,
         drum_dynamics=request.drum_dynamics,
+        harmony_spice=request.harmony_spice,
         seed=request.seed,
     )
     return arrangement, None
@@ -385,12 +393,14 @@ def _write_arrangement(
         "requested_humanize": request.humanize or "off",
         "requested_swing": request.swing or "off",
         "requested_drum_dynamics": request.drum_dynamics or "off",
+        "requested_harmony_spice": request.harmony_spice or "off",
         "resolved_chord_density": arrangement.chord_density,
         "resolved_melody_density": arrangement.melody_density,
         "resolved_chord_rhythm_style": arrangement.chord_rhythm_style,
         "resolved_humanize": arrangement.humanize,
         "resolved_swing": arrangement.swing,
         "resolved_drum_dynamics": arrangement.drum_dynamics,
+        "resolved_harmony_spice": arrangement.harmony_spice,
         "files": [file.name for file in files],
         "progression_label": arrangement.progression_label,
         "progression_degrees": arrangement.progression_degrees,
@@ -645,6 +655,7 @@ def _read_existing_arrangement(output_dir: Path, metadata: dict[str, object]) ->
         humanize=str(metadata.get("resolved_humanize") or "off"),
         swing=str(metadata.get("resolved_swing") or "off"),
         drum_dynamics=str(metadata.get("resolved_drum_dynamics") or "off"),
+        harmony_spice=str(metadata.get("resolved_harmony_spice") or "off"),
     )
 
 
@@ -697,6 +708,7 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         humanize=_optional_string(load_batch_meta(batch_dir).get("humanize")) or _optional_string(metadata.get("requested_humanize")),
         swing=_optional_string(load_batch_meta(batch_dir).get("swing")) or _optional_string(metadata.get("requested_swing")),
         drum_dynamics=_optional_string(load_batch_meta(batch_dir).get("drum_dynamics")) or _optional_string(metadata.get("requested_drum_dynamics")),
+        harmony_spice=_optional_string(load_batch_meta(batch_dir).get("harmony_spice")) or _optional_string(metadata.get("requested_harmony_spice")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -720,6 +732,8 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
             chord_rhythm_style=request.chord_rhythm_style,
             humanize=request.humanize,
             swing=request.swing,
+            drum_dynamics=request.drum_dynamics,
+            harmony_spice=request.harmony_spice,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -753,6 +767,7 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         humanize=current.humanize,
         swing=current.swing,
         drum_dynamics=current.drum_dynamics,
+        harmony_spice=current.harmony_spice,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -782,6 +797,7 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         humanize=_optional_string(batch_meta.get("humanize")) or _optional_string(metadata.get("requested_humanize")),
         swing=_optional_string(batch_meta.get("swing")) or _optional_string(metadata.get("requested_swing")),
         drum_dynamics=_optional_string(batch_meta.get("drum_dynamics")) or _optional_string(metadata.get("requested_drum_dynamics")),
+        harmony_spice=_optional_string(batch_meta.get("harmony_spice")) or _optional_string(metadata.get("requested_harmony_spice")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -805,6 +821,8 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
             chord_rhythm_style=request.chord_rhythm_style,
             humanize=request.humanize,
             swing=request.swing,
+            drum_dynamics=request.drum_dynamics,
+            harmony_spice=request.harmony_spice,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -836,6 +854,7 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         humanize=current.humanize,
         swing=current.swing,
         drum_dynamics=current.drum_dynamics,
+        harmony_spice=current.harmony_spice,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -898,5 +917,6 @@ def _refresh_batch_candidate(batch_meta: dict[str, object], result: GenerationRe
             candidate["resolved_humanize"] = result.metadata.get("resolved_humanize")
             candidate["resolved_swing"] = result.metadata.get("resolved_swing")
             candidate["resolved_drum_dynamics"] = result.metadata.get("resolved_drum_dynamics")
+            candidate["resolved_harmony_spice"] = result.metadata.get("resolved_harmony_spice")
             candidate["bars"] = result.metadata.get("bars")
             break

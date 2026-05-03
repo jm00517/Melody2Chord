@@ -129,6 +129,7 @@ class ResolvedGenerationControls:
     humanize: str
     swing: str
     drum_dynamics: str
+    harmony_spice: str
 
 
 ALLOWED_CHORD_DENSITIES = {"1", "2", "3"}
@@ -137,6 +138,15 @@ ALLOWED_CHORD_RHYTHMS = {"hold", "stab", "strum"}
 ALLOWED_HUMANIZE = {"off", "low", "med", "high"}
 ALLOWED_SWING = {"off", "low", "med", "high"}
 ALLOWED_DRUM_DYNAMICS = {"off", "low", "med", "high"}
+ALLOWED_HARMONY_SPICE = {"off", "low", "med", "high"}
+
+# Per-bar probability of swapping a chord with a secondary dominant or borrowed chord.
+HARMONY_SPICE_CHANCE = {
+    "off": 0.0,
+    "low": 0.18,
+    "med": 0.35,
+    "high": 0.55,
+}
 
 HUMANIZE_INTENSITY = {
     "off": 0.0,
@@ -161,7 +171,7 @@ SWING_PERCENT = {
 HIHAT_DRUM_PITCHES = {42, 44, 46}
 
 
-def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None, tempo: int | None, key: str | None, bars: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, seed: int | None) -> Arrangement:
+def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None, tempo: int | None, key: str | None, bars: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, seed: int | None) -> Arrangement:
     randomizer = random.Random(seed)
     resolved_mode = _resolve_mode(text_features, melody_analysis)
     resolved_key = normalize_key_name(key or (melody_analysis.key if melody_analysis else _default_key_for(text_features, resolved_mode)))
@@ -175,6 +185,7 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
         humanize=humanize,
         swing=swing,
         drum_dynamics=drum_dynamics,
+        harmony_spice=harmony_spice,
         text_features=text_features,
         has_source_melody=melody_analysis is not None,
         randomizer=randomizer,
@@ -220,10 +231,11 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
         humanize=controls.humanize,
         swing=controls.swing,
         drum_dynamics=controls.drum_dynamics,
+        harmony_spice=controls.harmony_spice,
     )
 
 
-def build_arrangement_from_progression(*, progression: ParsedProgression, text_features: TextFeatures | None, tempo: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, seed: int | None) -> Arrangement:
+def build_arrangement_from_progression(*, progression: ParsedProgression, text_features: TextFeatures | None, tempo: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, seed: int | None) -> Arrangement:
     randomizer = random.Random(seed)
     resolved_tempo = tempo or _default_tempo_for(text_features)
     style_tags = list(text_features.style_tags) if text_features else []
@@ -234,11 +246,12 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
         humanize=humanize,
         swing=swing,
         drum_dynamics=drum_dynamics,
+        harmony_spice=harmony_spice,
         text_features=text_features,
         has_source_melody=False,
         randomizer=randomizer,
     )
-    chords = _generate_fixed_progression_chords(progression.chord_bars, controls)
+    chords = _generate_fixed_progression_chords(progression.chord_bars, controls, progression.key, progression.mode, randomizer)
     melody = _generate_melody_from_progression(progression, text_features, controls.melody_density, randomizer)
     bass, bass_pattern = _generate_bassline(chords, text_features, randomizer)
     drums, drum_pattern = _generate_drum_pattern(progression.bars, text_features, randomizer, controls.drum_dynamics)
@@ -275,6 +288,7 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
         humanize=controls.humanize,
         swing=controls.swing,
         drum_dynamics=controls.drum_dynamics,
+        harmony_spice=controls.harmony_spice,
     )
 
 
@@ -300,7 +314,7 @@ def _default_tempo_for(text_features: TextFeatures | None) -> int:
     return 110
 
 
-def _resolve_generation_controls(*, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, text_features: TextFeatures | None, has_source_melody: bool, randomizer: random.Random) -> ResolvedGenerationControls:
+def _resolve_generation_controls(*, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, text_features: TextFeatures | None, has_source_melody: bool, randomizer: random.Random) -> ResolvedGenerationControls:
     return ResolvedGenerationControls(
         chord_density=_resolve_chord_density(chord_density, text_features, has_source_melody, randomizer),
         melody_density=_resolve_melody_density(melody_density, text_features, has_source_melody, randomizer),
@@ -308,6 +322,7 @@ def _resolve_generation_controls(*, chord_density: str | None, melody_density: s
         humanize=_resolve_humanize(humanize, text_features),
         swing=_resolve_swing(swing, text_features),
         drum_dynamics=_resolve_drum_dynamics(drum_dynamics, text_features),
+        harmony_spice=_resolve_harmony_spice(harmony_spice, text_features),
     )
 
 
@@ -406,6 +421,25 @@ def _resolve_drum_dynamics(value: str | None, text_features: TextFeatures | None
     return 'med'
 
 
+def _resolve_harmony_spice(value: str | None, text_features: TextFeatures | None) -> str:
+    if value in ALLOWED_HARMONY_SPICE:
+        return value
+    if value != 'auto':
+        return 'off'
+    if text_features is None:
+        return 'low'
+    genre = (text_features.genre or 'pop').lower()
+    mood = (text_features.mood or '').lower()
+    style_tokens = {tag.lower() for tag in (text_features.style_tags or [])}
+    if 'jazzy' in style_tokens or 'lofi' in style_tokens or genre == 'rnb':
+        return 'high'
+    if mood in {'melancholy', 'bittersweet', 'dark', 'dreamy'}:
+        return 'med'
+    if genre == 'house':
+        return 'low'
+    return 'low'
+
+
 def _pick_progression_variant(mode: str, text_features: TextFeatures | None, randomizer: random.Random) -> tuple[str, list[int]]:
     genre = text_features.genre if text_features else "pop"
     options = PROGRESSION_LIBRARY.get((mode, genre)) or PROGRESSION_LIBRARY.get((mode, "pop")) or [("Default 1-5-6-4", [1, 5, 6, 4])]
@@ -420,10 +454,11 @@ def _generate_progression_chords(key: str, mode: str, bars: int, progression: li
         degree = progression[bar % len(progression)]
         base_options.append(_pick_text_chord_option(key, mode, degree, bar, bars, randomizer))
     events = _build_chord_events(scale, base_options, controls, randomizer)
+    events = _apply_harmony_spice(events, key, mode, randomizer, intensity_label=controls.harmony_spice)
     return _render_chord_events(events, controls.chord_rhythm_style)
 
 
-def _generate_fixed_progression_chords(chord_bars: list[ChordBar], controls: ResolvedGenerationControls) -> list[NoteEvent]:
+def _generate_fixed_progression_chords(chord_bars: list[ChordBar], controls: ResolvedGenerationControls, key: str, mode: str, randomizer: random.Random) -> list[NoteEvent]:
     events: list[ChordEvent] = []
     for bar_index, chord_bar in enumerate(chord_bars):
         for start_tick, duration in _slot_spans(bar_index * BAR_TICKS, controls.chord_density):
@@ -437,6 +472,7 @@ def _generate_fixed_progression_chords(chord_bars: list[ChordBar], controls: Res
                     duration=duration,
                 )
             )
+    events = _apply_harmony_spice(events, key, mode, randomizer, intensity_label=controls.harmony_spice)
     return _render_chord_events(events, controls.chord_rhythm_style)
 
 
@@ -481,6 +517,7 @@ def _generate_chords_for_melody(key: str, mode: str, melody: list[NoteEvent], ba
 
     selected_options = [choices[index] for index in selected_indices]
     events = _build_chord_events(scale, selected_options, controls, randomizer)
+    events = _apply_harmony_spice(events, key, mode, randomizer, intensity_label=controls.harmony_spice)
     notes = _render_chord_events(events, controls.chord_rhythm_style)
     degrees = [option.degree for option in selected_options]
     flavors = [option.label for option in selected_options]
@@ -950,6 +987,58 @@ def _generate_drum_pattern(bars: int, text_features: TextFeatures | None, random
                 tick = bar_start + (12 + index * (4 // max(1, fill_count))) * sixteenth
                 notes.append(NoteEvent(pitch=38, start=tick, duration=sixteenth, velocity=80 + index * 4, channel=9))
     return sorted(notes, key=lambda note: (note.start, note.pitch)), pattern_name
+
+
+def _apply_harmony_spice(events: list[ChordEvent], key: str, mode: str, randomizer: random.Random, *, intensity_label: str) -> list[ChordEvent]:
+    """Replace some diatonic chord events with secondary dominants or borrowed chords.
+
+    Off is a strict no-op (no RNG calls) so seed reproducibility is preserved.
+    """
+    chance = HARMONY_SPICE_CHANCE.get(intensity_label, 0.0)
+    if chance <= 0.0 or len(events) < 2:
+        return events
+    scale = scale_for(key, mode)
+    spiced: list[ChordEvent] = []
+    for index, event in enumerate(events):
+        spiced_event = event
+        next_event = events[index + 1] if index + 1 < len(events) else None
+        # Try a secondary dominant of the next chord first (V/<next degree>)
+        if next_event is not None and randomizer.random() < chance:
+            target_degree = next_event.degree
+            if 1 <= target_degree <= 7 and target_degree != event.degree:
+                target_root = scale[(target_degree - 1) % 7]
+                v_root = (target_root + 7) % 12
+                spiced_event = ChordEvent(
+                    degree=event.degree,
+                    label=f"V/{target_degree}",
+                    root_pc=v_root,
+                    pitch_classes=(v_root, (v_root + 4) % 12, (v_root + 7) % 12, (v_root + 10) % 12),
+                    start_tick=event.start_tick,
+                    duration=event.duration,
+                )
+                spiced.append(spiced_event)
+                continue
+        # Fall back to a borrowed chord with smaller probability
+        if randomizer.random() < chance * 0.4:
+            tonic = scale[0]
+            if mode == "major":
+                # Borrow bVII major or bVI major from parallel minor
+                choice = randomizer.choice(["bVII", "bVI"])
+                root_pc = (tonic + (10 if choice == "bVII" else 8)) % 12
+            else:
+                # Borrow IV major from parallel major
+                choice = "IV"
+                root_pc = (tonic + 5) % 12
+            spiced_event = ChordEvent(
+                degree=event.degree,
+                label=choice,
+                root_pc=root_pc,
+                pitch_classes=(root_pc, (root_pc + 4) % 12, (root_pc + 7) % 12),
+                start_tick=event.start_tick,
+                duration=event.duration,
+            )
+        spiced.append(spiced_event)
+    return spiced
 
 
 def _apply_swing(notes: list[NoteEvent], *, intensity_label: str, channels: set[int] | None = None, drum_pitches: set[int] | None = None) -> list[NoteEvent]:

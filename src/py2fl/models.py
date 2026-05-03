@@ -70,6 +70,7 @@ class Arrangement:
     humanize: str = "off"
     swing: str = "off"
     drum_dynamics: str = "off"
+    harmony_spice: str = "off"
 
 
 @dataclass(slots=True)
@@ -87,6 +88,7 @@ class GenerationRequest:
     humanize: str | None = None
     swing: str | None = None
     drum_dynamics: str | None = None
+    harmony_spice: str | None = None
     seed: int | None = None
     output_dir: Path = Path("exports")
 
