@@ -22,7 +22,9 @@ from .audio import (
     resolve_fluidsynth_binary,
     resolve_soundfont,
 )
+from . import llm as llm_module
 from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta, reroll_candidate_bar, select_candidate
+from .llm import is_available as llm_is_available, suggest_from_text
 from .library import (
     CONTROL_KEYS as LIBRARY_CONTROL_KEYS,
     delete_entry as library_delete_entry,
@@ -137,6 +139,20 @@ class Py2FLWebApp:
                 return self._handle_preview_render(environ, start_response)
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "POST" and path == "/llm/suggest":
+            try:
+                body = self._handle_llm_suggest(environ)
+                return self._respond_html(start_response, "200 OK", body)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "POST" and path == "/llm/suggest-chords":
+            try:
+                body = self._handle_llm_suggest(environ, chords_mode=True)
+                return self._respond_html(start_response, "200 OK", body)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_chords_page(error=str(exc)))
 
         return self._respond_html(start_response, "404 Not Found", "<h1>Not Found</h1>")
 
@@ -364,6 +380,34 @@ class Py2FLWebApp:
     def _redirect(self, start_response: Callable, location: str):
         start_response("303 See Other", [("Location", location), ("Content-Length", "0")])
         return [b""]
+
+    def _handle_llm_suggest(self, environ: dict, chords_mode: bool = False) -> str:
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        text_value = _optional_text(form.getfirst("text")) or ""
+        chord_progression = _optional_text(form.getfirst("chord_progression")) or ""
+        if not text_value and not chord_progression:
+            raise ValueError("Enter a text prompt before requesting a suggestion.")
+        prompt = text_value
+        if chord_progression and chords_mode:
+            prompt = f"{text_value} (chord progression: {chord_progression})".strip()
+
+        suggestion = suggest_from_text(prompt)
+
+        state = _state_from_form(form, chords_mode=chords_mode)
+        state = _apply_suggestion_to_state(state, suggestion.fields)
+
+        notice_parts = [f"Source: {suggestion.source}"]
+        if suggestion.rationale:
+            notice_parts.append(suggestion.rationale)
+        if suggestion.error:
+            notice_parts.append(f"Note: {suggestion.error}")
+        if not llm_is_available() and suggestion.source == "rule":
+            notice_parts.append("Set GEMINI_API_KEY to enable LLM suggestions.")
+        info = " · ".join(notice_parts)
+
+        if chords_mode:
+            return self._render_chords_page(form_state=state, info=info)
+        return self._render_page(form_state=state, info=info)
 
     def _handle_preview_render(self, environ: dict, start_response: Callable):
         form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
@@ -742,6 +786,7 @@ class Py2FLWebApp:
     .audio-rerender {{ margin: 0; }}
     .save-form {{ display: flex; gap: 8px; align-items: center; }}
     .save-form input {{ padding: 8px 12px; border-radius: 12px; border: 1px solid rgba(31,26,20,0.14); background: var(--surface-strong); font: inherit; flex: 1; min-width: 140px; }}
+    .form-actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
     @media (max-width: 1100px) {{ .detail-hero {{ grid-template-columns: 1fr; }} .detail-grid {{ grid-template-columns: 1fr; }} .layout {{ grid-template-columns: 1fr; }} }}
     @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} .mute-grid {{ grid-template-columns: 1fr; }} .candidate-tabs {{ grid-template-columns: 1fr; }} .timeline-grid {{ grid-template-columns: 1fr; }} .detail-meta {{ grid-template-columns: 1fr; }} .overview-head {{ display: grid; }} .progression-text {{ font-size: 28px; }} }}
   </style>
@@ -784,7 +829,10 @@ class Py2FLWebApp:
           </div>
           <input type="hidden" name="melody_source" value="{html.escape(state.get("melody_source", ""))}">
           <p class="hint">Enter text, a melody MIDI file, or both. The result view now shows the full chord path from start to finish plus a bar-by-bar melody match timeline.</p>
-          <button type="submit">Generate Options</button>
+          <div class="form-actions">
+            <button type="submit">Generate Options</button>
+            <button type="submit" class="ghost" formaction="/llm/suggest" formenctype="application/x-www-form-urlencoded">{'✨'} Suggest from Text</button>
+          </div>
         </form>
       </section>
       <aside class="panel">
@@ -806,6 +854,7 @@ class Py2FLWebApp:
           <div class="spec"><strong>Candidate overview</strong>Use the top comparison bar to scan every option's progression before opening one in detail.</div>
           <div class="spec"><strong>Chord-to-melody mode</strong>Open <a href="/melody-from-chords">/melody-from-chords</a> to generate toplines from a fixed chord progression.</div>
           <div class="spec"><strong>Library</strong>Save winning candidates with the ★ button on a candidate card and find them at <a href="/library">/library</a>.</div>
+          <div class="spec"><strong>Smart Suggestions</strong>Press <code>✨ Suggest from Text</code> to fill BPM/key/genre and the 9 controls from your prompt. Set <code>GEMINI_API_KEY</code> for LLM-powered suggestions; otherwise a rule-based fallback is used.</div>
           <div class="spec"><strong>Harmony timeline</strong>Each detailed view shows bar-by-bar chords, representative melody pitches, and a simple match percentage.</div>
           <div class="spec"><strong>Browser playback</strong>Each candidate previews its `full_arrangement.mid` file directly in the browser with a lightweight synth setup.</div>
           <div class="spec"><strong>Saved selection</strong>`Select This` stores the chosen option in <code>{BATCH_META_FILENAME}</code> inside the batch folder.</div>
@@ -1208,7 +1257,10 @@ class Py2FLWebApp:
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
           <p class="hint">Supports both degree notation and named chords. One token equals one bar by default.</p>
-          <button type="submit">Generate Melodies</button>
+          <div class="form-actions">
+            <button type="submit">Generate Melodies</button>
+            <button type="submit" class="ghost" formaction="/llm/suggest-chords">{'✨'} Suggest from Text</button>
+          </div>
         </form>
       </section>
       <aside class="panel">
@@ -1766,6 +1818,57 @@ def _state_from_library_entry(entry: dict[str, object]) -> dict[str, str]:
         "chord_progression": _string_value(entry.get("source_progression") or entry.get("full_progression_text")),
     }
     return state
+
+
+def _state_from_form(form: cgi.FieldStorage, chords_mode: bool = False) -> dict[str, str]:
+    state = {
+        "text": _optional_text(form.getfirst("text")) or "",
+        "tempo": _optional_text(form.getfirst("tempo")) or "",
+        "key": _optional_text(form.getfirst("key")) or "",
+        "genre": _optional_text(form.getfirst("genre")) or "",
+        "bars": _optional_text(form.getfirst("bars")) or "",
+        "chord_density": _optional_text(form.getfirst("chord_density")) or "auto",
+        "melody_density": _optional_text(form.getfirst("melody_density")) or "auto",
+        "chord_rhythm_style": _optional_text(form.getfirst("chord_rhythm_style")) or "auto",
+        "humanize": _optional_text(form.getfirst("humanize")) or "off",
+        "swing": _optional_text(form.getfirst("swing")) or "off",
+        "drum_dynamics": _optional_text(form.getfirst("drum_dynamics")) or "off",
+        "harmony_spice": _optional_text(form.getfirst("harmony_spice")) or "off",
+        "section_dynamics": _optional_text(form.getfirst("section_dynamics")) or "off",
+        "modulate": _optional_text(form.getfirst("modulate")) or "off",
+        "seed": _optional_text(form.getfirst("seed")) or "",
+        "count": _optional_text(form.getfirst("count")) or "4",
+        "melody_source": _optional_text(form.getfirst("melody_source")) or "",
+    }
+    if chords_mode:
+        state["chord_progression"] = _optional_text(form.getfirst("chord_progression")) or ""
+    return state
+
+
+def _apply_suggestion_to_state(state: dict[str, str], fields: dict[str, object]) -> dict[str, str]:
+    out = dict(state)
+    for key in ("tempo", "bars"):
+        if fields.get(key) is not None:
+            out[key] = str(fields[key])
+    for key in ("key", "genre"):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    for key in (
+        "chord_density",
+        "melody_density",
+        "chord_rhythm_style",
+        "humanize",
+        "swing",
+        "drum_dynamics",
+        "harmony_spice",
+        "section_dynamics",
+        "modulate",
+    ):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    return out
 
 
 def _state_from_request(request: GenerationRequest, count: int) -> dict[str, str]:

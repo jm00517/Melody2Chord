@@ -10,6 +10,7 @@ It focuses on a practical file-based workflow:
 - reroll harmony globally or per bar
 - save winning candidates to a personal library and recall them later
 - render WAV audio previews via SoundFont (optional)
+- get LLM-powered or rule-based parameter suggestions from a text prompt
 - keep outputs easy to drag into FL Studio
 
 For Korean documentation, see [READMEKR.md](READMEKR.md).
@@ -417,6 +418,35 @@ batch = generate_candidates(
     count=4,
 )
 ```
+
+## Smart Suggestions (Gemini Flash, optional)
+
+The web UI has a `✨ Suggest from Text` button next to each `Generate` button.
+It reads your text prompt and pre-fills tempo, key, genre, bars, and all 9
+musical realism controls so you can tweak before generating.
+
+### Two modes
+
+- **LLM mode** (preferred when configured): if `GEMINI_API_KEY` (or
+  `GOOGLE_API_KEY`) is set in your environment, py2fl calls
+  [Google Gemini Flash](https://aistudio.google.com/app/apikey) to translate
+  free-form prompts ("ethereal post-rock at golden hour") into concrete
+  parameter values. Gemini's free tier (15 req/min, 1500 req/day) is more than
+  enough for personal use.
+- **Rule-based fallback**: with no key configured, py2fl uses the same
+  `text_analysis.py` keyword heuristics that drive `auto` mode. The button
+  still works, just with simpler logic.
+
+### Setup (LLM mode)
+
+1. Get a free Gemini API key at <https://aistudio.google.com/app/apikey>.
+2. Set `GEMINI_API_KEY=your-key` in your shell or `.env`.
+3. Optional: override the model with `PY2FL_GEMINI_MODEL=gemini-2.0-flash-lite`.
+4. Restart the web UI.
+
+The result panel shows the source (`llm` or `rule`) and a one-line rationale
+so you can tell which path was taken. All API errors gracefully fall back to
+rule-based output — you'll never get a broken page from a network blip.
 
 ## REAPER Workflow
 
