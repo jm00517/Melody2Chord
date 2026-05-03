@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .generator import generate_candidates, generate_song
+from .library import list_entries as library_list_entries
 from .models import GenerationRequest
 from .web import run_server
 
@@ -38,6 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Default: 127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8765, help="Port to bind. Default: 8765")
     serve_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory for generated files.")
+    serve_parser.add_argument("--library-dir", type=Path, default=None, help="Library directory. Defaults to <out>/../library.")
+
+    library_parser = subparsers.add_parser("library", help="Manage the saved-candidate library.")
+    library_subparsers = library_parser.add_subparsers(dest="library_command", required=True)
+    list_parser = library_subparsers.add_parser("list", help="List saved candidates.")
+    list_parser.add_argument("--library-dir", type=Path, default=Path("library"), help="Library directory. Default: ./library")
+    list_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
     return parser
 
 
@@ -91,8 +99,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "serve":
-        run_server(host=args.host, port=args.port, output_dir=args.out)
+        run_server(host=args.host, port=args.port, output_dir=args.out, library_dir=args.library_dir)
         return 0
+
+    if args.command == "library":
+        if args.library_command == "list":
+            entries = library_list_entries(args.library_dir)
+            if args.json:
+                print(json.dumps(entries, indent=2, ensure_ascii=False))
+                return 0
+            if not entries:
+                print(f"No saved candidates in {args.library_dir}.")
+                return 0
+            print(f"{'ID':40}  {'NAME':24}  {'SAVED':19}  SUMMARY")
+            for entry in entries:
+                summary = entry.get("full_progression_text") or entry.get("progression_label") or entry.get("text") or "-"
+                summary = str(summary).replace("\n", " ")
+                if len(summary) > 60:
+                    summary = summary[:57] + "..."
+                print(f"{str(entry.get('id') or '-'):40}  {str(entry.get('name') or '-'):24}  {str(entry.get('saved_at') or '-'):19}  {summary}")
+            return 0
+        return 1
 
     return 1
 

@@ -8,6 +8,7 @@ It focuses on a practical file-based workflow:
 - generate a combined `full_arrangement.mid`
 - preview and compare candidates in a local web UI
 - reroll harmony globally or per bar
+- save winning candidates to a personal library and recall them later
 - keep outputs easy to drag into FL Studio
 
 For Korean documentation, see [READMEKR.md](READMEKR.md).
@@ -24,6 +25,7 @@ For Korean documentation, see [READMEKR.md](READMEKR.md).
 - Bar-level harmony reroll with partial DOM refresh
 - Visual harmony timeline with chord names, melody focus notes, and match percentage
 - Separate part exports plus a combined arrangement export
+- Library page for saving winning candidates and continuing from them later
 
 ### Musical realism controls (opt-in)
 
@@ -149,12 +151,21 @@ Options:
 - `--host`: default `127.0.0.1`
 - `--port`: default `8765`
 - `--out`: output root directory, default `exports`
+- `--library-dir`: library directory, default `<out>/../library`
 
 Example:
 
 ```bash
 py2fl serve --host 127.0.0.1 --port 8765 --out ./exports
 ```
+
+### Library
+
+```bash
+py2fl library list [--library-dir ./library] [--json]
+```
+
+Lists saved candidates from disk. Pass `--json` for machine-readable output.
 
 ## Windows Batch Launcher
 
@@ -228,6 +239,44 @@ Behavior:
 - user-entered chord progression stays fixed
 - melody candidates change across seeds and rerolls
 - bar reroll updates `melody.mid` and `full_arrangement.mid` while preserving the harmonic path
+
+## Library
+
+Save winning candidates and recall them later, even after `exports/` is cleaned out.
+
+- Default location: `library/` next to your `exports/` directory.
+- Each saved entry is a **copy** of the candidate folder (immutable snapshot).
+- Trigger: explicit `★ Save to Library` button on a candidate detail card.
+
+### Storage layout
+
+```
+library/
+├── index.json                 # catalog of saved entries
+└── <slug>__<short_hash>/      # full copy of a candidate folder
+    ├── melody.mid
+    ├── chords.mid
+    ├── bass.mid
+    ├── drums.mid
+    ├── full_arrangement.mid
+    └── meta.json
+```
+
+### Continue from this
+
+The library page (`/library` in the web UI) lists every saved entry. Each row offers:
+
+- `Open` — view files, controls, and download the MIDI directly
+- `Continue from this` — preload the original prompt, key, tempo, bars, and all 9 controls into the generator form so you can iterate from a saved starting point
+- `Delete` — remove the saved folder and index entry (asks for confirmation)
+
+### CLI
+
+```bash
+py2fl library list                    # human-readable table
+py2fl library list --json             # machine-readable JSON
+py2fl library list --library-dir ./my_library
+```
 
 ## Generation Rules
 

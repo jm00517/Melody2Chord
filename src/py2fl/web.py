@@ -11,6 +11,14 @@ import uuid
 from wsgiref.simple_server import make_server
 
 from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta, reroll_candidate_bar, select_candidate
+from .library import (
+    CONTROL_KEYS as LIBRARY_CONTROL_KEYS,
+    delete_entry as library_delete_entry,
+    entry_dir as library_entry_dir,
+    get_entry as library_get_entry,
+    list_entries as library_list_entries,
+    save_candidate as library_save_candidate,
+)
 from .models import GenerationRequest
 
 TITLE = "py2fl Studio"
@@ -18,8 +26,9 @@ TRACK_NAMES = ("Melody", "Chords", "Bass", "Drums")
 
 
 class Py2FLWebApp:
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, library_dir: Path | None = None):
         self.output_dir = Path(output_dir)
+        self.library_dir = Path(library_dir) if library_dir is not None else self.output_dir.parent / "library"
 
     def __call__(self, environ: dict, start_response: Callable):
         method = environ.get("REQUEST_METHOD", "GET")
@@ -61,6 +70,31 @@ class Py2FLWebApp:
                 return self._respond_html(start_response, "200 OK", body)
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "GET" and path == "/library":
+            return self._respond_html(start_response, "200 OK", self._render_library_page(environ))
+
+        if method == "GET" and path.startswith("/library/"):
+            entry_id = path[len("/library/"):]
+            return self._respond_html(start_response, "200 OK", self._render_library_entry_page(entry_id))
+
+        if method == "POST" and path == "/library/save":
+            try:
+                return self._handle_library_save(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "POST" and path == "/library/continue":
+            try:
+                return self._handle_library_continue(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_library_page(environ, error=str(exc)))
+
+        if method == "POST" and path == "/library/delete":
+            try:
+                return self._handle_library_delete(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_library_page(environ, error=str(exc)))
 
         return self._respond_html(start_response, "404 Not Found", "<h1>Not Found</h1>")
 
@@ -241,6 +275,192 @@ class Py2FLWebApp:
         return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
 
 
+    def _handle_library_save(self, environ: dict, start_response: Callable):
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        batch_dir_value = _optional_text(form.getfirst("batch_dir"))
+        candidate_index = _optional_int(form.getfirst("candidate_index"))
+        name = _optional_text(form.getfirst("name")) or ""
+        if not batch_dir_value or candidate_index is None:
+            raise ValueError("batch_dir and candidate_index are required")
+
+        batch_dir = self._resolve_under_output(Path(batch_dir_value))
+        candidate_dir = batch_dir / f"option_{candidate_index:02d}"
+        if not candidate_dir.is_dir():
+            candidate_meta = next(
+                (item for item in load_batch_meta(batch_dir).get("candidates", []) if int(item.get("candidate_index") or 0) == candidate_index),
+                None,
+            )
+            if candidate_meta and candidate_meta.get("output_dir"):
+                candidate_dir = self._resolve_under_output(Path(str(candidate_meta["output_dir"])))
+        candidate_dir = self._resolve_under_output(candidate_dir)
+        library_save_candidate(candidate_dir, name, self.library_dir)
+        return self._redirect(start_response, "/library")
+
+    def _handle_library_continue(self, environ: dict, start_response: Callable):
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        entry_id = _optional_text(form.getfirst("entry_id"))
+        if not entry_id:
+            raise ValueError("entry_id is required")
+        entry = library_get_entry(entry_id, self.library_dir)
+        if entry is None:
+            raise ValueError(f"library entry not found: {entry_id}")
+        state = _state_from_library_entry(entry)
+        if entry.get("ui_mode") == "melody_from_chords":
+            body = self._render_chords_page(form_state=state, info=f"Loaded controls from '{entry.get('name') or entry_id}'. Adjust if needed and generate.")
+        else:
+            body = self._render_page(form_state=state, info=f"Loaded controls from '{entry.get('name') or entry_id}'. Adjust if needed and generate.")
+        return self._respond_html(start_response, "200 OK", body)
+
+    def _handle_library_delete(self, environ: dict, start_response: Callable):
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        entry_id = _optional_text(form.getfirst("entry_id"))
+        if not entry_id:
+            raise ValueError("entry_id is required")
+        library_delete_entry(entry_id, self.library_dir)
+        return self._redirect(start_response, "/library")
+
+    def _redirect(self, start_response: Callable, location: str):
+        start_response("303 See Other", [("Location", location), ("Content-Length", "0")])
+        return [b""]
+
+    def _render_library_page(self, environ: dict, error: str | None = None) -> str:
+        entries = library_list_entries(self.library_dir)
+        error_html = ""
+        if error:
+            error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
+        if not entries:
+            rows_html = '<section class="empty-state">No saved candidates yet. Open a generated option and press <strong>★ Save to Library</strong>.</section>'
+        else:
+            rows = []
+            for entry in entries:
+                rows.append(_library_entry_row(entry))
+            rows_html = '<section class="library-grid">' + "".join(rows) + "</section>"
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{TITLE} — Library</title>
+  <style>
+    body {{ margin: 0; font-family: Georgia, "Times New Roman", serif; background: #f1ede3; color: #1f1a14; min-height: 100vh; }}
+    .shell {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }}
+    h1 {{ margin: 0 0 8px; font-size: 42px; }}
+    .lead {{ color: #6d614e; max-width: 60ch; margin-bottom: 20px; }}
+    .topbar {{ display: flex; justify-content: space-between; align-items: end; margin-bottom: 20px; gap: 16px; flex-wrap: wrap; }}
+    .topbar a {{ color: #7f2f18; text-decoration: none; font-weight: 700; }}
+    .panel {{ background: rgba(255,255,255,0.82); border: 1px solid rgba(31,26,20,0.15); border-radius: 24px; padding: 18px; box-shadow: 0 24px 60px rgba(73, 48, 25, 0.12); }}
+    .empty-state {{ background: rgba(255,255,255,0.6); border: 1px dashed rgba(31,26,20,0.2); border-radius: 18px; padding: 36px 24px; color: #6d614e; text-align: center; }}
+    .library-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }}
+    .lib-card {{ display: grid; gap: 10px; padding: 18px; }}
+    .lib-card h3 {{ margin: 0; font-size: 22px; }}
+    .lib-meta {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 14px; color: #6d614e; font-size: 13px; }}
+    .lib-meta strong {{ color: #1f1a14; font-size: 14px; }}
+    .lib-tags {{ display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }}
+    .lib-tag {{ background: rgba(178,74,43,0.1); color: #7f2f18; border-radius: 999px; padding: 4px 10px; }}
+    .lib-actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .lib-actions form {{ display: block; margin: 0; }}
+    button, .btn {{ border: 0; border-radius: 999px; padding: 10px 16px; background: linear-gradient(135deg, #b24a2b, #d67b3d); color: white; font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; font-family: inherit; }}
+    .btn.ghost {{ background: rgba(178,74,43,0.08); color: #7f2f18; border: 1px solid rgba(178,74,43,0.2); }}
+    .btn.danger {{ background: linear-gradient(135deg, #6b2018, #8a3324); }}
+    .lib-prompt {{ font-size: 14px; line-height: 1.5; }}
+    .error {{ border-color: rgba(178,74,43,0.3); background: rgba(255,238,229,0.92); }}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="topbar">
+      <div>
+        <h1>Library</h1>
+        <p class="lead">Saved candidates live here. Each entry is a frozen copy of the candidate folder, safe to keep even after <code>{html.escape(str(self.output_dir))}</code> is cleaned out.</p>
+      </div>
+      <a href="/">← Back to Studio</a>
+    </div>
+    {error_html}
+    {rows_html}
+  </main>
+</body>
+</html>"""
+
+    def _render_library_entry_page(self, entry_id: str) -> str:
+        entry = library_get_entry(entry_id, self.library_dir)
+        if entry is None:
+            return f"""<!doctype html><html><body style="font-family: serif; padding: 40px;"><h1>Not found</h1><p>No library entry with id <code>{html.escape(entry_id)}</code>.</p><p><a href="/library">← Library</a></p></body></html>"""
+        folder = library_entry_dir(entry_id, self.library_dir)
+        preview_file = entry.get("preview_file") or "full_arrangement.mid"
+        preview_path = folder / str(preview_file)
+        preview_url = f"/files?path={quote(str(preview_path))}"
+        files = sorted(p.name for p in folder.glob("*.mid"))
+        files_html = "".join(f'<li><code>{html.escape(name)}</code> — <a href="/files?path={quote(str(folder / name))}" download>download</a></li>' for name in files)
+        controls = entry.get("controls") or {}
+        controls_html = "".join(
+            f'<div class="meta-card"><span>{html.escape(key)}</span><strong>{html.escape(str(controls.get(key, "off")))}</strong></div>'
+            for key in LIBRARY_CONTROL_KEYS
+        )
+        progression = entry.get("full_progression_text") or entry.get("progression_label") or "-"
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{TITLE} — {html.escape(str(entry.get('name') or entry_id))}</title>
+  <style>
+    body {{ margin: 0; font-family: Georgia, "Times New Roman", serif; background: #f1ede3; color: #1f1a14; min-height: 100vh; }}
+    .shell {{ max-width: 1100px; margin: 0 auto; padding: 32px 20px 64px; }}
+    h1 {{ margin: 0 0 8px; font-size: 36px; }}
+    .panel {{ background: rgba(255,255,255,0.82); border: 1px solid rgba(31,26,20,0.15); border-radius: 24px; padding: 22px; box-shadow: 0 24px 60px rgba(73, 48, 25, 0.12); margin-bottom: 18px; }}
+    .meta-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }}
+    .meta-card {{ background: rgba(255,250,240,0.75); border: 1px solid rgba(31,26,20,0.12); border-radius: 16px; padding: 12px 14px; display: grid; gap: 4px; }}
+    .meta-card span {{ color: #6d614e; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; }}
+    .meta-card strong {{ font-size: 16px; }}
+    .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }}
+    .actions form {{ margin: 0; }}
+    button, .btn {{ border: 0; border-radius: 999px; padding: 10px 16px; background: linear-gradient(135deg, #b24a2b, #d67b3d); color: white; font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; font-family: inherit; }}
+    .btn.ghost {{ background: rgba(178,74,43,0.08); color: #7f2f18; border: 1px solid rgba(178,74,43,0.2); }}
+    .btn.danger {{ background: linear-gradient(135deg, #6b2018, #8a3324); }}
+    audio {{ width: 100%; margin-top: 8px; }}
+    code {{ font-family: ui-monospace, Menlo, monospace; font-size: 12px; }}
+    .progression {{ font-size: 24px; line-height: 1.2; }}
+    ul {{ padding-left: 18px; }}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <p><a href="/library">← Library</a></p>
+    <section class="panel">
+      <h1>{html.escape(str(entry.get('name') or entry_id))}</h1>
+      <p class="progression">{html.escape(progression)}</p>
+      <div class="meta-grid">
+        <div class="meta-card"><span>Saved</span><strong>{html.escape(str(entry.get('saved_at') or '-'))}</strong></div>
+        <div class="meta-card"><span>Input mode</span><strong>{html.escape(str(entry.get('input_mode') or '-'))}</strong></div>
+        <div class="meta-card"><span>Tempo</span><strong>{html.escape(str(entry.get('tempo') or '-'))}</strong></div>
+        <div class="meta-card"><span>Key</span><strong>{html.escape(str(entry.get('key') or '-'))}</strong></div>
+        <div class="meta-card"><span>Bars</span><strong>{html.escape(str(entry.get('bars') or '-'))}</strong></div>
+        <div class="meta-card"><span>Genre</span><strong>{html.escape(str(entry.get('genre') or '-'))}</strong></div>
+        <div class="meta-card"><span>Seed</span><strong>{html.escape(str(entry.get('candidate_seed') or '-'))}</strong></div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Controls</h2>
+      <div class="meta-grid">{controls_html}</div>
+    </section>
+    <section class="panel">
+      <h2>Files</h2>
+      <ul>{files_html}</ul>
+      <p>Preview: <a class="btn ghost" href="{html.escape(preview_url)}" download>Download {html.escape(str(preview_file))}</a></p>
+      <div class="actions">
+        <form method="post" action="/library/continue">
+          <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
+          <button type="submit">Continue from this</button>
+        </form>
+        <form method="post" action="/library/delete" onsubmit="return confirm('Delete this saved entry? The folder under library/ will be removed.');">
+          <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
+          <button type="submit" class="btn danger">Delete</button>
+        </form>
+      </div>
+    </section>
+  </main>
+</body>
+</html>"""
+
     def _render_reroll_bar_fragment(self, candidates: list, batch_meta: dict[str, object], candidate_index: int, bar_index: int) -> str:
         result = next((item for item in candidates if int(item.metadata.get("candidate_index") or 0) == candidate_index), None)
         if result is None:
@@ -293,11 +513,14 @@ class Py2FLWebApp:
         batch_meta: dict[str, object] | None = None,
         form_state: dict[str, str] | None = None,
         error: str | None = None,
+        info: str | None = None,
     ) -> str:
         state = form_state or {}
         error_html = ""
         if error:
             error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
+        if info:
+            error_html += f'<section class="panel"><h2>From Library</h2><p>{html.escape(info)}</p></section>'
 
         reroll_controls = ""
         comparison_bar = ""
@@ -496,6 +719,7 @@ class Py2FLWebApp:
         <div class="specs">
           <div class="spec"><strong>Candidate overview</strong>Use the top comparison bar to scan every option's progression before opening one in detail.</div>
           <div class="spec"><strong>Chord-to-melody mode</strong>Open <a href="/melody-from-chords">/melody-from-chords</a> to generate toplines from a fixed chord progression.</div>
+          <div class="spec"><strong>Library</strong>Save winning candidates with the ★ button on a candidate card and find them at <a href="/library">/library</a>.</div>
           <div class="spec"><strong>Harmony timeline</strong>Each detailed view shows bar-by-bar chords, representative melody pitches, and a simple match percentage.</div>
           <div class="spec"><strong>Browser playback</strong>Each candidate previews its `full_arrangement.mid` file directly in the browser with a lightweight synth setup.</div>
           <div class="spec"><strong>Saved selection</strong>`Select This` stores the chosen option in <code>{BATCH_META_FILENAME}</code> inside the batch folder.</div>
@@ -780,11 +1004,14 @@ class Py2FLWebApp:
         batch_meta: dict[str, object] | None = None,
         form_state: dict[str, str] | None = None,
         error: str | None = None,
+        info: str | None = None,
     ) -> str:
         state = form_state or {}
         error_html = ""
         if error:
             error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
+        if info:
+            error_html += f'<section class="panel"><h2>From Library</h2><p>{html.escape(info)}</p></section>'
 
         reroll_controls = ""
         comparison_bar = ""
@@ -1180,11 +1407,18 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
     timeline = _timeline_blocks(meta.get("bar_summary", []), batch_dir, candidate_index, preview_url_escaped, tempo, str(meta.get("bar_action_label", "Reroll Harmony")))
     selected_option = None if not batch_meta else batch_meta.get("selected_option")
     selected = selected_option == meta.get("candidate_index")
+    default_save_name = str(meta.get("text") or meta.get("progression_label") or f"Option {candidate_index:02d}")[:60]
     select_form = f"""
       <form method="post" action="/select">
         <input type="hidden" name="batch_dir" value="{html.escape(str(batch_dir))}">
         <input type="hidden" name="candidate_index" value="{html.escape(str(meta.get('candidate_index')))}">
         <button type="submit" class="select-btn {'secondary' if selected else ''}">Select This</button>
+      </form>
+      <form method="post" action="/library/save" class="save-form">
+        <input type="hidden" name="batch_dir" value="{html.escape(str(batch_dir))}">
+        <input type="hidden" name="candidate_index" value="{html.escape(str(meta.get('candidate_index')))}">
+        <input type="text" name="name" placeholder="Save name" value="{html.escape(default_save_name)}" required>
+        <button type="submit" class="ghost">★ Save to Library</button>
       </form>
     """
     return f"""
@@ -1318,6 +1552,80 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
               <div class="inline-error" hidden></div>
             </div>
     """
+
+
+def _library_entry_row(entry: dict[str, object]) -> str:
+    entry_id = str(entry.get("id") or "")
+    name = str(entry.get("name") or entry_id)
+    saved_at = str(entry.get("saved_at") or "-")
+    progression = str(entry.get("full_progression_text") or entry.get("progression_label") or "-")
+    text = str(entry.get("text") or "")
+    style_tags = entry.get("style_tags") or []
+    if isinstance(style_tags, list):
+        tags_html = "".join(f'<span class="lib-tag">{html.escape(str(tag))}</span>' for tag in style_tags[:5])
+    else:
+        tags_html = ""
+    controls = entry.get("controls") or {}
+    if isinstance(controls, dict):
+        active_controls = [(k, v) for k, v in controls.items() if v not in (None, "off", "auto", "")]
+    else:
+        active_controls = []
+    controls_summary = ", ".join(f"{k}: {v}" for k, v in active_controls) or "defaults"
+    return f"""
+    <article class="panel lib-card">
+      <h3>{html.escape(name)}</h3>
+      <div class="lib-meta">
+        <div><span>Saved</span><strong>{html.escape(saved_at)}</strong></div>
+        <div><span>Mode</span><strong>{html.escape(str(entry.get('input_mode') or '-'))}</strong></div>
+        <div><span>Tempo</span><strong>{html.escape(str(entry.get('tempo') or '-'))}</strong></div>
+        <div><span>Key</span><strong>{html.escape(str(entry.get('key') or '-'))}</strong></div>
+        <div><span>Bars</span><strong>{html.escape(str(entry.get('bars') or '-'))}</strong></div>
+        <div><span>Genre</span><strong>{html.escape(str(entry.get('genre') or '-'))}</strong></div>
+      </div>
+      <p class="lib-prompt">{html.escape(text) if text else '<em>(no text prompt)</em>'}</p>
+      <p class="lib-prompt"><strong>Progression:</strong> {html.escape(progression)}</p>
+      <div class="lib-tags">{tags_html}</div>
+      <p class="lib-prompt"><strong>Controls:</strong> {html.escape(controls_summary)}</p>
+      <div class="lib-actions">
+        <a class="btn ghost" href="/library/{quote(entry_id)}">Open</a>
+        <form method="post" action="/library/continue">
+          <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
+          <button type="submit">Continue from this</button>
+        </form>
+        <form method="post" action="/library/delete" onsubmit="return confirm('Delete this saved entry? The folder under library/ will be removed.');">
+          <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
+          <button type="submit" class="btn danger">Delete</button>
+        </form>
+      </div>
+    </article>
+    """
+
+
+def _state_from_library_entry(entry: dict[str, object]) -> dict[str, str]:
+    controls = entry.get("controls") or {}
+    if not isinstance(controls, dict):
+        controls = {}
+    state = {
+        "text": _string_value(entry.get("text")),
+        "tempo": _string_value(entry.get("tempo")),
+        "key": _string_value(entry.get("key")),
+        "genre": _string_value(entry.get("genre")),
+        "bars": _string_value(entry.get("bars")),
+        "chord_density": _string_value(controls.get("chord_density")) or "auto",
+        "melody_density": _string_value(controls.get("melody_density")) or "auto",
+        "chord_rhythm_style": _string_value(controls.get("chord_rhythm_style")) or "auto",
+        "humanize": _string_value(controls.get("humanize")) or "off",
+        "swing": _string_value(controls.get("swing")) or "off",
+        "drum_dynamics": _string_value(controls.get("drum_dynamics")) or "off",
+        "harmony_spice": _string_value(controls.get("harmony_spice")) or "off",
+        "section_dynamics": _string_value(controls.get("section_dynamics")) or "off",
+        "modulate": _string_value(controls.get("modulate")) or "off",
+        "seed": _string_value(entry.get("candidate_seed")),
+        "count": "4",
+        "melody_source": _string_value(entry.get("source_melody")),
+        "chord_progression": _string_value(entry.get("source_progression") or entry.get("full_progression_text")),
+    }
+    return state
 
 
 def _state_from_request(request: GenerationRequest, count: int) -> dict[str, str]:
@@ -1487,13 +1795,14 @@ def _string_value(value: object) -> str:
     return str(value)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765, output_dir: Path = Path("exports")) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8765, output_dir: Path = Path("exports"), library_dir: Path | None = None) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    app = Py2FLWebApp(output_dir=output_dir)
+    app = Py2FLWebApp(output_dir=output_dir, library_dir=library_dir)
     with make_server(host, port, app) as server:
         print(f"py2fl web UI running at http://{host}:{port}")
         print(f"Output directory: {output_dir.resolve()}")
+        print(f"Library directory: {app.library_dir.resolve()}")
         server.serve_forever()
 
 
