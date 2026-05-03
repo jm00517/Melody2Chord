@@ -75,6 +75,7 @@ class Py2FLWebApp:
         melody_density = _normalize_auto_option(form.getfirst("melody_density"))
         chord_rhythm_style = _normalize_auto_option(form.getfirst("chord_rhythm_style"))
         humanize = _normalize_humanize_option(form.getfirst("humanize"))
+        swing = _normalize_humanize_option(form.getfirst("swing"))
         seed = _optional_int(form.getfirst("seed"))
         count = _optional_int(form.getfirst("count")) or 4
         count = max(1, min(count, 8))
@@ -99,6 +100,7 @@ class Py2FLWebApp:
             melody_density=melody_density,
             chord_rhythm_style=chord_rhythm_style,
             humanize=humanize,
+            swing=swing,
             seed=seed,
             output_dir=self.output_dir,
         )
@@ -119,6 +121,7 @@ class Py2FLWebApp:
         melody_density = _normalize_auto_option(form.getfirst("melody_density"))
         chord_rhythm_style = _normalize_auto_option(form.getfirst("chord_rhythm_style"))
         humanize = _normalize_humanize_option(form.getfirst("humanize"))
+        swing = _normalize_humanize_option(form.getfirst("swing"))
         seed = _optional_int(form.getfirst("seed"))
         count = _optional_int(form.getfirst("count")) or 4
         count = max(1, min(count, 8))
@@ -139,6 +142,7 @@ class Py2FLWebApp:
             melody_density=melody_density,
             chord_rhythm_style=chord_rhythm_style,
             humanize=humanize,
+            swing=swing,
             seed=seed,
             output_dir=self.output_dir,
         )
@@ -167,6 +171,7 @@ class Py2FLWebApp:
             "melody_density": _string_value(batch_meta.get("melody_density")) or "auto",
             "chord_rhythm_style": _string_value(batch_meta.get("chord_rhythm_style")) or "auto",
             "humanize": _string_value(batch_meta.get("humanize")) or "off",
+        "swing": _string_value(batch_meta.get("swing")) or "off",
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
@@ -202,6 +207,7 @@ class Py2FLWebApp:
             "melody_density": _string_value(batch_meta.get("melody_density")) or "auto",
             "chord_rhythm_style": _string_value(batch_meta.get("chord_rhythm_style")) or "auto",
             "humanize": _string_value(batch_meta.get("humanize")) or "off",
+        "swing": _string_value(batch_meta.get("swing")) or "off",
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
@@ -435,6 +441,7 @@ class Py2FLWebApp:
             {_select_field_html("Melody Density", "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
             {_select_field_html("Chord Rhythm", "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
             {_select_field_html("Humanize", "humanize", state.get("humanize", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html("Swing", "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
@@ -851,6 +858,7 @@ class Py2FLWebApp:
             {_select_field_html("Melody Density", "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
             {_select_field_html("Chord Rhythm", "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
             {_select_field_html("Humanize", "humanize", state.get("humanize", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html("Swing", "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
@@ -1160,6 +1168,7 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
           <div class="meta-card"><span>Melody Density</span><strong>{html.escape(str(meta.get('resolved_melody_density')))}</strong></div>
           <div class="meta-card"><span>Chord Rhythm</span><strong>{html.escape(str(meta.get('resolved_chord_rhythm_style')))}</strong></div>
           <div class="meta-card"><span>Humanize</span><strong>{html.escape(str(meta.get('resolved_humanize') or 'off'))}</strong></div>
+          <div class="meta-card"><span>Swing</span><strong>{html.escape(str(meta.get('resolved_swing') or 'off'))}</strong></div>
           <div class="meta-card"><span>Drums</span><strong>{html.escape(str(meta.get('drum_pattern')))}</strong></div>
           <div class="meta-card"><span>Bass</span><strong>{html.escape(str(meta.get('bass_pattern')))}</strong></div>
         </div>
@@ -1286,6 +1295,7 @@ def _state_from_request(request: GenerationRequest, count: int) -> dict[str, str
         "melody_density": request.melody_density or "auto",
         "chord_rhythm_style": request.chord_rhythm_style or "auto",
         "humanize": request.humanize or "off",
+        "swing": request.swing or "off",
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
         "melody_source": "" if request.melody_midi_path is None else str(request.melody_midi_path),
@@ -1304,6 +1314,7 @@ def _state_from_chords_request(request: GenerationRequest, count: int) -> dict[s
         "melody_density": request.melody_density or "auto",
         "chord_rhythm_style": request.chord_rhythm_style or "auto",
         "humanize": request.humanize or "off",
+        "swing": request.swing or "off",
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
     }
@@ -1321,6 +1332,7 @@ def _state_from_batch_chords(batch_meta: dict[str, object], count: int) -> dict[
         "melody_density": _string_value(batch_meta.get("melody_density")) or "auto",
         "chord_rhythm_style": _string_value(batch_meta.get("chord_rhythm_style")) or "auto",
         "humanize": _string_value(batch_meta.get("humanize")) or "off",
+        "swing": _string_value(batch_meta.get("swing")) or "off",
         "seed": _string_value(batch_meta.get("seed")),
         "count": _string_value(batch_meta.get("candidate_count")) or str(count),
     }

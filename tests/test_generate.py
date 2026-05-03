@@ -450,3 +450,31 @@ def test_humanize_is_deterministic_per_seed(tmp_path: Path) -> None:
     first_sig = [(n.pitch, n.start, n.duration, n.velocity) for n in first_notes]
     second_sig = [(n.pitch, n.start, n.duration, n.velocity) for n in second_notes]
     assert first_sig == second_sig
+
+
+def test_swing_off_keeps_offbeat_eighths_on_grid(tmp_path: Path) -> None:
+    result = generate_song(
+        GenerationRequest(text="dreamy rnb dense topline", bars=4, seed=11, melody_density="dense", swing="off", output_dir=tmp_path)
+    )
+    melody_tracks, _ = parse_midi_notes(result.output_dir / "melody.mid")
+    melody_notes = next(track for track in melody_tracks if track.notes).notes
+    eighth = BAR_TICKS // 8
+    for note in melody_notes:
+        assert note.start % eighth == 0 or note.start % (BAR_TICKS // 6) == 0 or note.start % (BAR_TICKS // 12) == 0, \
+            f"swing=off must leave grid-aligned starts intact (got {note.start})"
+    assert result.metadata["resolved_swing"] == "off"
+
+
+def test_swing_high_pushes_offbeat_eighths(tmp_path: Path) -> None:
+    base = generate_song(
+        GenerationRequest(text="dreamy rnb topline", bars=4, seed=21, melody_density="dense", swing="off", output_dir=tmp_path / "off")
+    )
+    swung = generate_song(
+        GenerationRequest(text="dreamy rnb topline", bars=4, seed=21, melody_density="dense", swing="high", output_dir=tmp_path / "swung")
+    )
+    base_tracks, _ = parse_midi_notes(base.output_dir / "melody.mid")
+    swung_tracks, _ = parse_midi_notes(swung.output_dir / "melody.mid")
+    base_starts = [n.start for n in next(track for track in base_tracks if track.notes).notes]
+    swung_starts = [n.start for n in next(track for track in swung_tracks if track.notes).notes]
+    assert any(b != s for b, s in zip(base_starts, swung_starts)), "swing=high must shift at least some off-eighth notes"
+    assert swung.metadata["resolved_swing"] == "high"

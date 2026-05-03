@@ -68,6 +68,7 @@ class Arrangement:
     melody_density: str = "normal"
     chord_rhythm_style: str = "hold"
     humanize: str = "off"
+    swing: str = "off"
 
 
 @dataclass(slots=True)
@@ -83,6 +84,7 @@ class GenerationRequest:
     melody_density: str | None = None
     chord_rhythm_style: str | None = None
     humanize: str | None = None
+    swing: str | None = None
     seed: int | None = None
     output_dir: Path = Path("exports")
 
