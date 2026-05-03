@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8765, help="Port to bind. Default: 8765")
     serve_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory for generated files.")
     serve_parser.add_argument("--library-dir", type=Path, default=None, help="Library directory. Defaults to <out>/../library.")
+    serve_parser.add_argument("--soundfont", type=Path, default=None, help="Path to a SoundFont .sf2 file for audio preview rendering. Defaults to PY2FL_SOUNDFONT env var.")
+    serve_parser.add_argument("--fluidsynth", default=None, help="Override the fluidsynth binary path. Defaults to PY2FL_FLUIDSYNTH or `fluidsynth` on PATH.")
 
     library_parser = subparsers.add_parser("library", help="Manage the saved-candidate library.")
     library_subparsers = library_parser.add_subparsers(dest="library_command", required=True)
@@ -99,7 +101,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "serve":
-        run_server(host=args.host, port=args.port, output_dir=args.out, library_dir=args.library_dir)
+        run_server(
+            host=args.host,
+            port=args.port,
+            output_dir=args.out,
+            library_dir=args.library_dir,
+            soundfont=args.soundfont,
+            fluidsynth_binary=args.fluidsynth,
+        )
         return 0
 
     if args.command == "library":

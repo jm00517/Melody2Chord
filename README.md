@@ -9,6 +9,7 @@ It focuses on a practical file-based workflow:
 - preview and compare candidates in a local web UI
 - reroll harmony globally or per bar
 - save winning candidates to a personal library and recall them later
+- render WAV audio previews via SoundFont (optional)
 - keep outputs easy to drag into FL Studio
 
 For Korean documentation, see [READMEKR.md](READMEKR.md).
@@ -152,11 +153,14 @@ Options:
 - `--port`: default `8765`
 - `--out`: output root directory, default `exports`
 - `--library-dir`: library directory, default `<out>/../library`
+- `--soundfont`: path to a `.sf2` file for audio preview (or set `PY2FL_SOUNDFONT`)
+- `--fluidsynth`: path to the fluidsynth binary (or set `PY2FL_FLUIDSYNTH`)
 
 Example:
 
 ```bash
 py2fl serve --host 127.0.0.1 --port 8765 --out ./exports
+py2fl serve --soundfont ./TimGM6mb.sf2 --out ./exports
 ```
 
 ### Library
@@ -277,6 +281,31 @@ py2fl library list                    # human-readable table
 py2fl library list --json             # machine-readable JSON
 py2fl library list --library-dir ./my_library
 ```
+
+## Audio Preview (SoundFont)
+
+The browser preview defaults to lightweight in-page MIDI synthesis. To get
+DAW-style sound, render WAV stems through a SoundFont using
+[fluidsynth](https://www.fluidsynth.org/).
+
+### Setup
+
+1. Install the `fluidsynth` binary so it is on your PATH (or pass `--fluidsynth /path/to/fluidsynth`).
+2. Download a `.sf2` SoundFont. A small free option is
+   [`TimGM6mb.sf2`](https://musescore.org/en/handbook/soundfonts-and-sfz-files-recommendations) (~5.7 MB, CC0).
+3. Either set `PY2FL_SOUNDFONT=/path/to/your.sf2` in your environment or pass
+   `--soundfont /path/to/your.sf2` when starting the server.
+
+### Behavior
+
+- Each candidate detail card and library entry page exposes an `Audio Preview`
+  panel. Click `Render Audio Preview` to render five WAVs into
+  `<candidate>/preview/`: `melody.wav`, `chords.wav`, `bass.wav`, `drums.wav`,
+  and `full_arrangement.wav` (the mix).
+- Renders are cached. Re-rendering only happens when the source `.mid` is newer
+  than the cached `.wav`, or when you click `Re-render`.
+- If `fluidsynth` or the SoundFont is missing, the panel falls back to the
+  existing in-browser MIDI preview and shows a hint about what to configure.
 
 ## Generation Rules
 
@@ -413,5 +442,5 @@ Pytest is configured in `pyproject.toml`, but in this environment it may fail ea
 - Rule-based generation, not an LLM composition system
 - No direct FL Studio Python API integration
 - No real-time MIDI/OSC bridge
-- Browser preview uses lightweight synth playback, not DAW-accurate rendering
+- Browser preview uses lightweight synth playback by default; SoundFont audio rendering is opt-in via `--soundfont`
 - Harmony reroll currently targets bar-level `chords + bass`, not full orchestration changes

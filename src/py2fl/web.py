@@ -4,12 +4,24 @@ import cgi
 import html
 import json
 import mimetypes
+import os
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, quote
 import uuid
 from wsgiref.simple_server import make_server
 
+from . import audio as audio_module
+from .audio import (
+    FluidsynthMissing,
+    PREVIEW_DIRNAME,
+    SoundFontMissing,
+    is_available as audio_is_available,
+    preview_wav_path,
+    render_candidate,
+    resolve_fluidsynth_binary,
+    resolve_soundfont,
+)
 from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta, reroll_candidate_bar, select_candidate
 from .library import (
     CONTROL_KEYS as LIBRARY_CONTROL_KEYS,
@@ -23,12 +35,36 @@ from .models import GenerationRequest
 
 TITLE = "py2fl Studio"
 TRACK_NAMES = ("Melody", "Chords", "Bass", "Drums")
+TRACK_FILE_NAMES = ("melody.mid", "chords.mid", "bass.mid", "drums.mid", "full_arrangement.mid")
 
 
 class Py2FLWebApp:
-    def __init__(self, output_dir: Path, library_dir: Path | None = None):
+    def __init__(
+        self,
+        output_dir: Path,
+        library_dir: Path | None = None,
+        soundfont: Path | str | None = None,
+        fluidsynth_binary: str | None = None,
+    ):
         self.output_dir = Path(output_dir)
         self.library_dir = Path(library_dir) if library_dir is not None else self.output_dir.parent / "library"
+        self._soundfont_explicit = soundfont
+        self._fluidsynth_explicit = fluidsynth_binary
+        if soundfont is not None:
+            sf_path = Path(soundfont).expanduser()
+            if sf_path.is_file():
+                os.environ.setdefault(audio_module.ENV_SOUNDFONT, str(sf_path))
+        if fluidsynth_binary is not None:
+            os.environ.setdefault(audio_module.ENV_FLUIDSYNTH, fluidsynth_binary)
+
+    def _resolved_soundfont(self) -> Path | None:
+        return resolve_soundfont(self._soundfont_explicit)
+
+    def _resolved_fluidsynth(self) -> str | None:
+        return resolve_fluidsynth_binary(self._fluidsynth_explicit)
+
+    def _audio_ready(self) -> bool:
+        return self._resolved_soundfont() is not None and self._resolved_fluidsynth() is not None
 
     def __call__(self, environ: dict, start_response: Callable):
         method = environ.get("REQUEST_METHOD", "GET")
@@ -95,6 +131,12 @@ class Py2FLWebApp:
                 return self._handle_library_delete(environ, start_response)
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_library_page(environ, error=str(exc)))
+
+        if method == "POST" and path == "/preview/render":
+            try:
+                return self._handle_preview_render(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
 
         return self._respond_html(start_response, "404 Not Found", "<h1>Not Found</h1>")
 
@@ -323,6 +365,33 @@ class Py2FLWebApp:
         start_response("303 See Other", [("Location", location), ("Content-Length", "0")])
         return [b""]
 
+    def _handle_preview_render(self, environ: dict, start_response: Callable):
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        candidate_dir_value = _optional_text(form.getfirst("candidate_dir"))
+        return_to = _optional_text(form.getfirst("return_to")) or "/"
+        force = form.getfirst("force") == "1"
+        if not candidate_dir_value:
+            raise ValueError("candidate_dir is required")
+        candidate_dir = self._resolve_candidate_dir(Path(candidate_dir_value))
+        sf2 = self._resolved_soundfont()
+        if sf2 is None:
+            raise SoundFontMissing("No SoundFont configured. Set PY2FL_SOUNDFONT or pass --soundfont when starting the server.")
+        binary = self._resolved_fluidsynth()
+        if binary is None:
+            raise FluidsynthMissing("fluidsynth binary not found on PATH.")
+        render_candidate(candidate_dir, soundfont=sf2, fluidsynth_binary=binary, force=force)
+        return self._redirect(start_response, return_to)
+
+    def _resolve_candidate_dir(self, path: Path) -> Path:
+        resolved = path.resolve(strict=False)
+        output_root = self.output_dir.resolve(strict=False)
+        library_root = self.library_dir.resolve(strict=False)
+        if resolved == output_root or output_root in resolved.parents:
+            return resolved
+        if resolved == library_root or library_root in resolved.parents:
+            return resolved
+        raise ValueError("Access denied")
+
     def _render_library_page(self, environ: dict, error: str | None = None) -> str:
         entries = library_list_entries(self.library_dir)
         error_html = ""
@@ -420,6 +489,11 @@ class Py2FLWebApp:
     code {{ font-family: ui-monospace, Menlo, monospace; font-size: 12px; }}
     .progression {{ font-size: 24px; line-height: 1.2; }}
     ul {{ padding-left: 18px; }}
+    .audio-panel {{ margin-top: 14px; padding: 14px; border-radius: 16px; border: 1px solid rgba(31,26,20,0.12); background: rgba(255,250,240,0.7); display: grid; gap: 10px; }}
+    .audio-panel h4 {{ margin: 0; font-size: 16px; }}
+    .audio-stems {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .audio-stem {{ font-size: 12px; padding: 6px 10px; border-radius: 999px; background: rgba(178,74,43,0.1); color: #7f2f18; text-decoration: none; }}
+    .hint {{ color: #6d614e; font-size: 13px; margin: 0; }}
   </style>
 </head>
 <body>
@@ -446,6 +520,7 @@ class Py2FLWebApp:
       <h2>Files</h2>
       <ul>{files_html}</ul>
       <p>Preview: <a class="btn ghost" href="{html.escape(preview_url)}" download>Download {html.escape(str(preview_file))}</a></p>
+      {_audio_preview_panel(folder, return_to=f"/library/{quote(entry_id)}")}
       <div class="actions">
         <form method="post" action="/library/continue">
           <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
@@ -490,8 +565,11 @@ class Py2FLWebApp:
             return self._respond_text(start_response, "400 Bad Request", "Missing path parameter")
         try:
             resolved = self._resolve_under_output(Path(path_value))
-        except ValueError as exc:
-            return self._respond_text(start_response, "403 Forbidden", str(exc))
+        except ValueError:
+            try:
+                resolved = self._resolve_candidate_dir(Path(path_value))
+            except ValueError as exc:
+                return self._respond_text(start_response, "403 Forbidden", str(exc))
         if not resolved.exists() or not resolved.is_file():
             return self._respond_text(start_response, "404 Not Found", "File not found")
         mime_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
@@ -656,6 +734,14 @@ class Py2FLWebApp:
     .volume-slider {{ width: 100%; accent-color: var(--accent); }}
     .mute-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
     .mute-toggle.active {{ background: linear-gradient(135deg, #6b5840, #9b866c); color: white; }}
+    .audio-panel {{ margin-top: 14px; padding: 14px; border-radius: 16px; border: 1px solid var(--line); background: rgba(255,250,240,0.7); display: grid; gap: 10px; }}
+    .audio-panel h4 {{ margin: 0; font-size: 16px; }}
+    .audio-panel audio {{ width: 100%; }}
+    .audio-stems {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .audio-stem {{ font-size: 12px; padding: 6px 10px; border-radius: 999px; background: rgba(178,74,43,0.1); color: var(--accent-dark); text-decoration: none; }}
+    .audio-rerender {{ margin: 0; }}
+    .save-form {{ display: flex; gap: 8px; align-items: center; }}
+    .save-form input {{ padding: 8px 12px; border-radius: 12px; border: 1px solid rgba(31,26,20,0.14); background: var(--surface-strong); font: inherit; flex: 1; min-width: 140px; }}
     @media (max-width: 1100px) {{ .detail-hero {{ grid-template-columns: 1fr; }} .detail-grid {{ grid-template-columns: 1fr; }} .layout {{ grid-template-columns: 1fr; }} }}
     @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} .mute-grid {{ grid-template-columns: 1fr; }} .candidate-tabs {{ grid-template-columns: 1fr; }} .timeline-grid {{ grid-template-columns: 1fr; }} .detail-meta {{ grid-template-columns: 1fr; }} .overview-head {{ display: grid; }} .progression-text {{ font-size: 28px; }} }}
   </style>
@@ -1407,6 +1493,7 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
     timeline = _timeline_blocks(meta.get("bar_summary", []), batch_dir, candidate_index, preview_url_escaped, tempo, str(meta.get("bar_action_label", "Reroll Harmony")))
     selected_option = None if not batch_meta else batch_meta.get("selected_option")
     selected = selected_option == meta.get("candidate_index")
+    audio_panel = _audio_preview_panel(Path(result.output_dir), return_to="/", soundfont_label=None)
     default_save_name = str(meta.get("text") or meta.get("progression_label") or f"Option {candidate_index:02d}")[:60]
     select_form = f"""
       <form method="post" action="/select">
@@ -1452,6 +1539,7 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
             {select_form}
           </div>
           <ul class="files">{file_list}</ul>
+          {audio_panel}
         </div>
         <div class="panel timeline-panel">
           <div class="timeline-head">
@@ -1552,6 +1640,58 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
               <div class="inline-error" hidden></div>
             </div>
     """
+
+
+def _audio_preview_panel(candidate_dir: Path, return_to: str, soundfont_label: str | None = None) -> str:
+    sf2 = resolve_soundfont()
+    binary = resolve_fluidsynth_binary()
+    ready = sf2 is not None and binary is not None
+    if not ready:
+        missing = []
+        if sf2 is None:
+            missing.append("a SoundFont (.sf2) — set <code>PY2FL_SOUNDFONT</code> or pass <code>--soundfont</code>")
+        if binary is None:
+            missing.append("the <code>fluidsynth</code> binary on PATH")
+        return (
+            '<div class="audio-panel"><h4>Audio Preview</h4>'
+            f'<p class="hint">Audio render needs {", and ".join(missing)}. Falling back to in-browser MIDI preview.</p>'
+            '</div>'
+        )
+    preview_dir = Path(candidate_dir) / PREVIEW_DIRNAME
+    mix_wav = preview_dir / "full_arrangement.wav"
+    has_mix = mix_wav.is_file()
+    label = soundfont_label or sf2.name
+    if not has_mix:
+        return f"""<div class="audio-panel">
+          <h4>Audio Preview</h4>
+          <p class="hint">SoundFont: <code>{html.escape(label)}</code>. Click to render WAV stems.</p>
+          <form method="post" action="/preview/render">
+            <input type="hidden" name="candidate_dir" value="{html.escape(str(candidate_dir))}">
+            <input type="hidden" name="return_to" value="{html.escape(return_to)}">
+            <button type="submit">Render Audio Preview</button>
+          </form>
+        </div>"""
+    mix_url = f"/files?path={quote(str(mix_wav))}"
+    stems_html = []
+    for stem in ("melody", "chords", "bass", "drums"):
+        wav = preview_dir / f"{stem}.wav"
+        if wav.is_file():
+            stems_html.append(
+                f'<a class="audio-stem" href="/files?path={quote(str(wav))}" download>{stem}.wav</a>'
+            )
+    rerender = f"""<form method="post" action="/preview/render" class="audio-rerender">
+        <input type="hidden" name="candidate_dir" value="{html.escape(str(candidate_dir))}">
+        <input type="hidden" name="return_to" value="{html.escape(return_to)}">
+        <input type="hidden" name="force" value="1">
+        <button type="submit" class="ghost">Re-render</button>
+      </form>"""
+    return f"""<div class="audio-panel">
+      <h4>Audio Preview</h4>
+      <p class="hint">SoundFont: <code>{html.escape(label)}</code></p>
+      <audio controls preload="metadata" src="{html.escape(mix_url)}"></audio>
+      <div class="audio-stems">{''.join(stems_html)}</div>
+      {rerender}
+    </div>"""
 
 
 def _library_entry_row(entry: dict[str, object]) -> str:
@@ -1795,14 +1935,32 @@ def _string_value(value: object) -> str:
     return str(value)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765, output_dir: Path = Path("exports"), library_dir: Path | None = None) -> None:
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    output_dir: Path = Path("exports"),
+    library_dir: Path | None = None,
+    soundfont: Path | str | None = None,
+    fluidsynth_binary: str | None = None,
+) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    app = Py2FLWebApp(output_dir=output_dir, library_dir=library_dir)
+    app = Py2FLWebApp(
+        output_dir=output_dir,
+        library_dir=library_dir,
+        soundfont=soundfont,
+        fluidsynth_binary=fluidsynth_binary,
+    )
     with make_server(host, port, app) as server:
         print(f"py2fl web UI running at http://{host}:{port}")
         print(f"Output directory: {output_dir.resolve()}")
         print(f"Library directory: {app.library_dir.resolve()}")
+        sf2 = app._resolved_soundfont()
+        binary = app._resolved_fluidsynth()
+        if sf2 and binary:
+            print(f"Audio preview ready (SoundFont: {sf2}, fluidsynth: {binary})")
+        else:
+            print("Audio preview disabled (set PY2FL_SOUNDFONT and install fluidsynth to enable).")
         server.serve_forever()
 
 
