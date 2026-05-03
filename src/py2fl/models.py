@@ -69,6 +69,7 @@ class Arrangement:
     chord_rhythm_style: str = "hold"
     humanize: str = "off"
     swing: str = "off"
+    drum_dynamics: str = "off"
 
 
 @dataclass(slots=True)
@@ -85,6 +86,7 @@ class GenerationRequest:
     chord_rhythm_style: str | None = None
     humanize: str | None = None
     swing: str | None = None
+    drum_dynamics: str | None = None
     seed: int | None = None
     output_dir: Path = Path("exports")
 

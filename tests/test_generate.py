@@ -478,3 +478,37 @@ def test_swing_high_pushes_offbeat_eighths(tmp_path: Path) -> None:
     swung_starts = [n.start for n in next(track for track in swung_tracks if track.notes).notes]
     assert any(b != s for b, s in zip(base_starts, swung_starts)), "swing=high must shift at least some off-eighth notes"
     assert swung.metadata["resolved_swing"] == "high"
+
+
+def test_drum_dynamics_off_matches_default(tmp_path: Path) -> None:
+    explicit = generate_song(
+        GenerationRequest(text="dreamy rnb topline", bars=4, seed=44, drum_dynamics="off", output_dir=tmp_path / "explicit")
+    )
+    default = generate_song(
+        GenerationRequest(text="dreamy rnb topline", bars=4, seed=44, output_dir=tmp_path / "default")
+    )
+    explicit_tracks, _ = parse_midi_notes(explicit.output_dir / "drums.mid")
+    default_tracks, _ = parse_midi_notes(default.output_dir / "drums.mid")
+    explicit_notes = [(n.pitch, n.start, n.velocity) for n in next(track for track in explicit_tracks if track.notes).notes]
+    default_notes = [(n.pitch, n.start, n.velocity) for n in next(track for track in default_tracks if track.notes).notes]
+    assert explicit_notes == default_notes
+    assert explicit.metadata["resolved_drum_dynamics"] == "off"
+
+
+def test_drum_dynamics_high_adds_ghost_notes_and_velocity_spread(tmp_path: Path) -> None:
+    plain = generate_song(
+        GenerationRequest(text="trap anthem", bars=8, seed=55, drum_dynamics="off", output_dir=tmp_path / "off")
+    )
+    rich = generate_song(
+        GenerationRequest(text="trap anthem", bars=8, seed=55, drum_dynamics="high", output_dir=tmp_path / "high")
+    )
+    plain_tracks, _ = parse_midi_notes(plain.output_dir / "drums.mid")
+    rich_tracks, _ = parse_midi_notes(rich.output_dir / "drums.mid")
+    plain_notes = next(track for track in plain_tracks if track.notes).notes
+    rich_notes = next(track for track in rich_tracks if track.notes).notes
+    assert len(rich_notes) > len(plain_notes), "drum_dynamics=high must introduce additional ghost or fill hits"
+
+    plain_velocities = {n.velocity for n in plain_notes}
+    rich_velocities = {n.velocity for n in rich_notes}
+    assert max(rich_velocities) - min(rich_velocities) > max(plain_velocities) - min(plain_velocities)
+    assert rich.metadata["resolved_drum_dynamics"] == "high"

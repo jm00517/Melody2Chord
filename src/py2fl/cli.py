@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--chord-rhythm-style", choices=["hold", "stab", "strum", "auto"], help="Chord rhythm playback style. Default: auto")
     generate_parser.add_argument("--humanize", choices=["off", "low", "med", "high", "auto"], default="off", help="Humanization (timing+velocity jitter). Default: off")
     generate_parser.add_argument("--swing", choices=["off", "low", "med", "high", "auto"], default="off", help="Swing feel (push off-eighth notes back). Default: off")
+    generate_parser.add_argument("--drum-dynamics", choices=["off", "low", "med", "high", "auto"], default="off", help="Drum accent curve, ghost notes, and end-of-phrase fills. Default: off")
     generate_parser.add_argument("--seed", type=int, help="Random seed for reproducible output.")
     generate_parser.add_argument("--count", type=int, default=1, help="Number of candidate options to generate.")
     generate_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory.")
@@ -57,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             chord_rhythm_style=None if args.chord_rhythm_style == "auto" else args.chord_rhythm_style,
             humanize=args.humanize,
             swing=args.swing,
+            drum_dynamics=args.drum_dynamics,
             seed=args.seed,
             output_dir=args.out,
         )
