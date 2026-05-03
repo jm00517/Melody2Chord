@@ -78,6 +78,7 @@ class Py2FLWebApp:
         swing = _normalize_humanize_option(form.getfirst("swing"))
         drum_dynamics = _normalize_humanize_option(form.getfirst("drum_dynamics"))
         harmony_spice = _normalize_humanize_option(form.getfirst("harmony_spice"))
+        section_dynamics = _normalize_humanize_option(form.getfirst("section_dynamics"))
         seed = _optional_int(form.getfirst("seed"))
         count = _optional_int(form.getfirst("count")) or 4
         count = max(1, min(count, 8))
@@ -105,6 +106,7 @@ class Py2FLWebApp:
             swing=swing,
             drum_dynamics=drum_dynamics,
             harmony_spice=harmony_spice,
+            section_dynamics=section_dynamics,
             seed=seed,
             output_dir=self.output_dir,
         )
@@ -128,6 +130,7 @@ class Py2FLWebApp:
         swing = _normalize_humanize_option(form.getfirst("swing"))
         drum_dynamics = _normalize_humanize_option(form.getfirst("drum_dynamics"))
         harmony_spice = _normalize_humanize_option(form.getfirst("harmony_spice"))
+        section_dynamics = _normalize_humanize_option(form.getfirst("section_dynamics"))
         seed = _optional_int(form.getfirst("seed"))
         count = _optional_int(form.getfirst("count")) or 4
         count = max(1, min(count, 8))
@@ -151,6 +154,7 @@ class Py2FLWebApp:
             swing=swing,
             drum_dynamics=drum_dynamics,
             harmony_spice=harmony_spice,
+            section_dynamics=section_dynamics,
             seed=seed,
             output_dir=self.output_dir,
         )
@@ -182,6 +186,7 @@ class Py2FLWebApp:
         "swing": _string_value(batch_meta.get("swing")) or "off",
         "drum_dynamics": _string_value(batch_meta.get("drum_dynamics")) or "off",
         "harmony_spice": _string_value(batch_meta.get("harmony_spice")) or "off",
+        "section_dynamics": _string_value(batch_meta.get("section_dynamics")) or "off",
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
@@ -220,6 +225,7 @@ class Py2FLWebApp:
         "swing": _string_value(batch_meta.get("swing")) or "off",
         "drum_dynamics": _string_value(batch_meta.get("drum_dynamics")) or "off",
         "harmony_spice": _string_value(batch_meta.get("harmony_spice")) or "off",
+        "section_dynamics": _string_value(batch_meta.get("section_dynamics")) or "off",
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
@@ -456,6 +462,7 @@ class Py2FLWebApp:
             {_select_field_html("Swing", "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             {_select_field_html("Drum Dynamics", "drum_dynamics", state.get("drum_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             {_select_field_html("Harmony Spice", "harmony_spice", state.get("harmony_spice", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html("Section Dynamics", "section_dynamics", state.get("section_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
@@ -875,6 +882,7 @@ class Py2FLWebApp:
             {_select_field_html("Swing", "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             {_select_field_html("Drum Dynamics", "drum_dynamics", state.get("drum_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             {_select_field_html("Harmony Spice", "harmony_spice", state.get("harmony_spice", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html("Section Dynamics", "section_dynamics", state.get("section_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
             <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
@@ -1187,6 +1195,7 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
           <div class="meta-card"><span>Swing</span><strong>{html.escape(str(meta.get('resolved_swing') or 'off'))}</strong></div>
           <div class="meta-card"><span>Drum Dynamics</span><strong>{html.escape(str(meta.get('resolved_drum_dynamics') or 'off'))}</strong></div>
           <div class="meta-card"><span>Harmony Spice</span><strong>{html.escape(str(meta.get('resolved_harmony_spice') or 'off'))}</strong></div>
+          <div class="meta-card"><span>Section Dyn.</span><strong>{html.escape(str(meta.get('resolved_section_dynamics') or 'off'))}</strong></div>
           <div class="meta-card"><span>Drums</span><strong>{html.escape(str(meta.get('drum_pattern')))}</strong></div>
           <div class="meta-card"><span>Bass</span><strong>{html.escape(str(meta.get('bass_pattern')))}</strong></div>
         </div>
@@ -1316,6 +1325,7 @@ def _state_from_request(request: GenerationRequest, count: int) -> dict[str, str
         "swing": request.swing or "off",
         "drum_dynamics": request.drum_dynamics or "off",
         "harmony_spice": request.harmony_spice or "off",
+        "section_dynamics": request.section_dynamics or "off",
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
         "melody_source": "" if request.melody_midi_path is None else str(request.melody_midi_path),
@@ -1337,6 +1347,7 @@ def _state_from_chords_request(request: GenerationRequest, count: int) -> dict[s
         "swing": request.swing or "off",
         "drum_dynamics": request.drum_dynamics or "off",
         "harmony_spice": request.harmony_spice or "off",
+        "section_dynamics": request.section_dynamics or "off",
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
     }
@@ -1357,6 +1368,7 @@ def _state_from_batch_chords(batch_meta: dict[str, object], count: int) -> dict[
         "swing": _string_value(batch_meta.get("swing")) or "off",
         "drum_dynamics": _string_value(batch_meta.get("drum_dynamics")) or "off",
         "harmony_spice": _string_value(batch_meta.get("harmony_spice")) or "off",
+        "section_dynamics": _string_value(batch_meta.get("section_dynamics")) or "off",
         "seed": _string_value(batch_meta.get("seed")),
         "count": _string_value(batch_meta.get("candidate_count")) or str(count),
     }

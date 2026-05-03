@@ -526,6 +526,37 @@ def test_harmony_spice_high_introduces_non_diatonic_chord_tones(tmp_path: Path) 
     assert spiced.metadata["resolved_harmony_spice"] == "high"
 
 
+def test_section_dynamics_off_matches_default(tmp_path: Path) -> None:
+    explicit = generate_song(
+        GenerationRequest(text="dreamy rnb topline", bars=8, seed=88, section_dynamics="off", output_dir=tmp_path / "explicit")
+    )
+    default = generate_song(
+        GenerationRequest(text="dreamy rnb topline", bars=8, seed=88, output_dir=tmp_path / "default")
+    )
+    explicit_tracks, _ = parse_midi_notes(explicit.output_dir / "melody.mid")
+    default_tracks, _ = parse_midi_notes(default.output_dir / "melody.mid")
+    explicit_notes = [(n.pitch, n.start, n.velocity) for n in next(track for track in explicit_tracks if track.notes).notes]
+    default_notes = [(n.pitch, n.start, n.velocity) for n in next(track for track in default_tracks if track.notes).notes]
+    assert explicit_notes == default_notes
+    assert explicit.metadata["resolved_section_dynamics"] == "off"
+    assert explicit.metadata["section_layout"] == []
+
+
+def test_section_dynamics_med_creates_chorus_with_higher_melody(tmp_path: Path) -> None:
+    result = generate_song(
+        GenerationRequest(text="dreamy rnb topline", bars=8, seed=33, section_dynamics="med", output_dir=tmp_path)
+    )
+    melody_tracks, _ = parse_midi_notes(result.output_dir / "melody.mid")
+    melody_notes = next(track for track in melody_tracks if track.notes).notes
+    half_bars = 4
+    verse_pitches = [n.pitch for n in melody_notes if n.start < half_bars * BAR_TICKS]
+    chorus_pitches = [n.pitch for n in melody_notes if n.start >= half_bars * BAR_TICKS]
+    assert verse_pitches and chorus_pitches
+    assert max(chorus_pitches) > max(verse_pitches), "chorus should sit higher than verse"
+    layout = result.metadata["section_layout"]
+    assert any(item[2] == "chorus" for item in layout)
+
+
 def test_drum_dynamics_high_adds_ghost_notes_and_velocity_spread(tmp_path: Path) -> None:
     plain = generate_song(
         GenerationRequest(text="trap anthem", bars=8, seed=55, drum_dynamics="off", output_dir=tmp_path / "off")

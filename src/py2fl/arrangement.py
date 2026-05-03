@@ -130,6 +130,7 @@ class ResolvedGenerationControls:
     swing: str
     drum_dynamics: str
     harmony_spice: str
+    section_dynamics: str
 
 
 ALLOWED_CHORD_DENSITIES = {"1", "2", "3"}
@@ -139,6 +140,7 @@ ALLOWED_HUMANIZE = {"off", "low", "med", "high"}
 ALLOWED_SWING = {"off", "low", "med", "high"}
 ALLOWED_DRUM_DYNAMICS = {"off", "low", "med", "high"}
 ALLOWED_HARMONY_SPICE = {"off", "low", "med", "high"}
+ALLOWED_SECTION_DYNAMICS = {"off", "low", "med", "high"}
 
 # Per-bar probability of swapping a chord with a secondary dominant or borrowed chord.
 HARMONY_SPICE_CHANCE = {
@@ -171,7 +173,7 @@ SWING_PERCENT = {
 HIHAT_DRUM_PITCHES = {42, 44, 46}
 
 
-def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None, tempo: int | None, key: str | None, bars: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, seed: int | None) -> Arrangement:
+def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: MelodyAnalysis | None, tempo: int | None, key: str | None, bars: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, section_dynamics: str | None, seed: int | None) -> Arrangement:
     randomizer = random.Random(seed)
     resolved_mode = _resolve_mode(text_features, melody_analysis)
     resolved_key = normalize_key_name(key or (melody_analysis.key if melody_analysis else _default_key_for(text_features, resolved_mode)))
@@ -186,6 +188,7 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
         swing=swing,
         drum_dynamics=drum_dynamics,
         harmony_spice=harmony_spice,
+        section_dynamics=section_dynamics,
         text_features=text_features,
         has_source_melody=melody_analysis is not None,
         randomizer=randomizer,
@@ -211,6 +214,9 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
     bass = _humanize_notes(bass, randomizer, intensity_label=controls.humanize)
     drums = _humanize_notes(drums, randomizer, intensity_label=controls.humanize)
 
+    section_layout = _build_section_layout(resolved_bars, controls.section_dynamics)
+    melody, chords, bass, drums = _apply_section_dynamics(melody, chords, bass, drums, layout=section_layout)
+
     return Arrangement(
         melody=melody,
         chords=chords,
@@ -232,10 +238,12 @@ def build_arrangement(*, text_features: TextFeatures | None, melody_analysis: Me
         swing=controls.swing,
         drum_dynamics=controls.drum_dynamics,
         harmony_spice=controls.harmony_spice,
+        section_dynamics=controls.section_dynamics,
+        section_layout=list(section_layout),
     )
 
 
-def build_arrangement_from_progression(*, progression: ParsedProgression, text_features: TextFeatures | None, tempo: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, seed: int | None) -> Arrangement:
+def build_arrangement_from_progression(*, progression: ParsedProgression, text_features: TextFeatures | None, tempo: int | None, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, section_dynamics: str | None, seed: int | None) -> Arrangement:
     randomizer = random.Random(seed)
     resolved_tempo = tempo or _default_tempo_for(text_features)
     style_tags = list(text_features.style_tags) if text_features else []
@@ -247,6 +255,7 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
         swing=swing,
         drum_dynamics=drum_dynamics,
         harmony_spice=harmony_spice,
+        section_dynamics=section_dynamics,
         text_features=text_features,
         has_source_melody=False,
         randomizer=randomizer,
@@ -264,6 +273,9 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
     chords = _humanize_notes(chords, randomizer, intensity_label=controls.humanize)
     bass = _humanize_notes(bass, randomizer, intensity_label=controls.humanize)
     drums = _humanize_notes(drums, randomizer, intensity_label=controls.humanize)
+
+    section_layout = _build_section_layout(progression.bars, controls.section_dynamics)
+    melody, chords, bass, drums = _apply_section_dynamics(melody, chords, bass, drums, layout=section_layout)
 
     degrees = [bar.degree for bar in progression.chord_bars]
     preview = '-'.join(bar.source_token for bar in progression.chord_bars[:4])
@@ -289,6 +301,8 @@ def build_arrangement_from_progression(*, progression: ParsedProgression, text_f
         swing=controls.swing,
         drum_dynamics=controls.drum_dynamics,
         harmony_spice=controls.harmony_spice,
+        section_dynamics=controls.section_dynamics,
+        section_layout=list(section_layout),
     )
 
 
@@ -314,7 +328,7 @@ def _default_tempo_for(text_features: TextFeatures | None) -> int:
     return 110
 
 
-def _resolve_generation_controls(*, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, text_features: TextFeatures | None, has_source_melody: bool, randomizer: random.Random) -> ResolvedGenerationControls:
+def _resolve_generation_controls(*, chord_density: str | None, melody_density: str | None, chord_rhythm_style: str | None, humanize: str | None, swing: str | None, drum_dynamics: str | None, harmony_spice: str | None, section_dynamics: str | None, text_features: TextFeatures | None, has_source_melody: bool, randomizer: random.Random) -> ResolvedGenerationControls:
     return ResolvedGenerationControls(
         chord_density=_resolve_chord_density(chord_density, text_features, has_source_melody, randomizer),
         melody_density=_resolve_melody_density(melody_density, text_features, has_source_melody, randomizer),
@@ -323,6 +337,7 @@ def _resolve_generation_controls(*, chord_density: str | None, melody_density: s
         swing=_resolve_swing(swing, text_features),
         drum_dynamics=_resolve_drum_dynamics(drum_dynamics, text_features),
         harmony_spice=_resolve_harmony_spice(harmony_spice, text_features),
+        section_dynamics=_resolve_section_dynamics(section_dynamics, text_features),
     )
 
 
@@ -438,6 +453,20 @@ def _resolve_harmony_spice(value: str | None, text_features: TextFeatures | None
     if genre == 'house':
         return 'low'
     return 'low'
+
+
+def _resolve_section_dynamics(value: str | None, text_features: TextFeatures | None) -> str:
+    if value in ALLOWED_SECTION_DYNAMICS:
+        return value
+    if value != 'auto':
+        return 'off'
+    if text_features is None:
+        return 'med'
+    energy = (text_features.energy or '').lower()
+    style_tokens = {tag.lower() for tag in (text_features.style_tags or [])}
+    if energy == 'high' or 'lift' in style_tokens or 'builder' in style_tokens:
+        return 'high'
+    return 'med'
 
 
 def _pick_progression_variant(mode: str, text_features: TextFeatures | None, randomizer: random.Random) -> tuple[str, list[int]]:
@@ -987,6 +1016,66 @@ def _generate_drum_pattern(bars: int, text_features: TextFeatures | None, random
                 tick = bar_start + (12 + index * (4 // max(1, fill_count))) * sixteenth
                 notes.append(NoteEvent(pitch=38, start=tick, duration=sixteenth, velocity=80 + index * 4, channel=9))
     return sorted(notes, key=lambda note: (note.start, note.pitch)), pattern_name
+
+
+def _build_section_layout(bars: int, intensity_label: str) -> list[tuple[int, int, str]]:
+    if intensity_label == "off" or bars < 4:
+        return []
+    if bars >= 16 and intensity_label == "high":
+        quarter = bars // 4
+        return [
+            (0, quarter, "verse"),
+            (quarter, 2 * quarter, "chorus"),
+            (2 * quarter, 3 * quarter, "verse"),
+            (3 * quarter, bars, "chorus"),
+        ]
+    half = bars // 2
+    return [(0, half, "verse"), (half, bars, "chorus")]
+
+
+def _apply_section_dynamics(
+    melody: list[NoteEvent],
+    chords: list[NoteEvent],
+    bass: list[NoteEvent],
+    drums: list[NoteEvent],
+    *,
+    layout: list[tuple[int, int, str]],
+) -> tuple[list[NoteEvent], list[NoteEvent], list[NoteEvent], list[NoteEvent]]:
+    if not layout:
+        return melody, chords, bass, drums
+    chorus_bars = {bar_index for start, end, name in layout for bar_index in range(start, end) if name == "chorus"}
+    if not chorus_bars:
+        return melody, chords, bass, drums
+
+    def _bar_index(note: NoteEvent) -> int:
+        return note.start // BAR_TICKS
+
+    def transform_melody(note: NoteEvent) -> NoteEvent:
+        if _bar_index(note) in chorus_bars:
+            return NoteEvent(pitch=clamp_pitch(note.pitch + 12, 0, 127), start=note.start, duration=note.duration, velocity=min(127, note.velocity + 4), channel=note.channel)
+        return NoteEvent(pitch=note.pitch, start=note.start, duration=note.duration, velocity=max(1, note.velocity - 6), channel=note.channel)
+
+    def transform_chord(note: NoteEvent) -> NoteEvent:
+        if _bar_index(note) in chorus_bars:
+            return NoteEvent(pitch=note.pitch, start=note.start, duration=note.duration, velocity=min(127, note.velocity + 6), channel=note.channel)
+        return NoteEvent(pitch=note.pitch, start=note.start, duration=note.duration, velocity=max(1, note.velocity - 6), channel=note.channel)
+
+    def transform_bass(note: NoteEvent) -> NoteEvent:
+        if _bar_index(note) in chorus_bars:
+            return NoteEvent(pitch=clamp_pitch(note.pitch - 12, 24, 60), start=note.start, duration=note.duration, velocity=min(127, note.velocity + 6), channel=note.channel)
+        return note
+
+    def transform_drum(note: NoteEvent) -> NoteEvent:
+        if _bar_index(note) in chorus_bars:
+            return NoteEvent(pitch=note.pitch, start=note.start, duration=note.duration, velocity=min(127, note.velocity + 8), channel=note.channel)
+        return NoteEvent(pitch=note.pitch, start=note.start, duration=note.duration, velocity=max(1, note.velocity - 6), channel=note.channel)
+
+    return (
+        [transform_melody(n) for n in melody],
+        [transform_chord(n) for n in chords],
+        [transform_bass(n) for n in bass],
+        [transform_drum(n) for n in drums],
+    )
 
 
 def _apply_harmony_spice(events: list[ChordEvent], key: str, mode: str, randomizer: random.Random, *, intensity_label: str) -> list[ChordEvent]:

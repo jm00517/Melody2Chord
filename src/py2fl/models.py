@@ -71,6 +71,8 @@ class Arrangement:
     swing: str = "off"
     drum_dynamics: str = "off"
     harmony_spice: str = "off"
+    section_dynamics: str = "off"
+    section_layout: list[tuple[int, int, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -89,6 +91,7 @@ class GenerationRequest:
     swing: str | None = None
     drum_dynamics: str | None = None
     harmony_spice: str | None = None
+    section_dynamics: str | None = None
     seed: int | None = None
     output_dir: Path = Path("exports")
 
