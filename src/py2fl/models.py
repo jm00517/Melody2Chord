@@ -73,6 +73,9 @@ class Arrangement:
     harmony_spice: str = "off"
     section_dynamics: str = "off"
     section_layout: list[tuple[int, int, str]] = field(default_factory=list)
+    modulate: str = "off"
+    modulation_start_bar: int | None = None
+    modulation_semitones: int = 0
 
 
 @dataclass(slots=True)
@@ -92,6 +95,7 @@ class GenerationRequest:
     drum_dynamics: str | None = None
     harmony_spice: str | None = None
     section_dynamics: str | None = None
+    modulate: str | None = None
     seed: int | None = None
     output_dir: Path = Path("exports")
 

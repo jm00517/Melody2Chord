@@ -69,6 +69,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 drum_dynamics=request.drum_dynamics,
                 harmony_spice=request.harmony_spice,
                 section_dynamics=request.section_dynamics,
+                modulate=request.modulate,
                 seed=base_seed,
                 output_dir=request.output_dir,
             ),
@@ -99,6 +100,7 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                 drum_dynamics=request.drum_dynamics,
                 harmony_spice=request.harmony_spice,
                 section_dynamics=request.section_dynamics,
+                modulate=request.modulate,
                 seed=attempt_seed,
                 output_dir=request.output_dir,
             )
@@ -136,6 +138,9 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     harmony_spice=arrangement.harmony_spice,
                     section_dynamics=arrangement.section_dynamics,
                     section_layout=arrangement.section_layout,
+                    modulate=arrangement.modulate,
+                    modulation_start_bar=arrangement.modulation_start_bar,
+                    modulation_semitones=arrangement.modulation_semitones,
                 )
             elif reroll_scope == "melody":
                 arrangement = Arrangement(
@@ -161,6 +166,9 @@ def generate_candidates(request: GenerationRequest, count: int = 4, reroll_scope
                     harmony_spice=arrangement.harmony_spice,
                     section_dynamics=arrangement.section_dynamics,
                     section_layout=arrangement.section_layout,
+                    modulate=arrangement.modulate,
+                    modulation_start_bar=arrangement.modulation_start_bar,
+                    modulation_semitones=arrangement.modulation_semitones,
                 )
         candidate_dir = batch_dir / f"option_{index + 1:02d}"
         result = _write_arrangement(
@@ -206,6 +214,7 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
         "drum_dynamics": request.drum_dynamics,
         "harmony_spice": request.harmony_spice,
         "section_dynamics": request.section_dynamics,
+        "modulate": request.modulate,
         "seed": request.seed,
         "candidate_count": len(results),
         "selected_option": selected_option,
@@ -232,6 +241,9 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
                 "resolved_drum_dynamics": result.metadata.get("resolved_drum_dynamics"),
                 "resolved_harmony_spice": result.metadata.get("resolved_harmony_spice"),
                 "resolved_section_dynamics": result.metadata.get("resolved_section_dynamics"),
+                "resolved_modulate": result.metadata.get("resolved_modulate"),
+                "modulation_start_bar": result.metadata.get("modulation_start_bar"),
+                "modulation_semitones": result.metadata.get("modulation_semitones"),
                 "preview_file": "full_arrangement.mid",
                 "bars": result.metadata.get("bars"),
             }
@@ -328,6 +340,7 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
             drum_dynamics=request.drum_dynamics,
             harmony_spice=request.harmony_spice,
             section_dynamics=request.section_dynamics,
+            modulate=request.modulate,
             seed=request.seed,
         )
         return arrangement, parsed_progression
@@ -345,6 +358,7 @@ def _build_for_request(request: GenerationRequest, context: dict[str, object]) -
         drum_dynamics=request.drum_dynamics,
         harmony_spice=request.harmony_spice,
         section_dynamics=request.section_dynamics,
+        modulate=request.modulate,
         seed=request.seed,
     )
     return arrangement, None
@@ -405,6 +419,7 @@ def _write_arrangement(
         "requested_drum_dynamics": request.drum_dynamics or "off",
         "requested_harmony_spice": request.harmony_spice or "off",
         "requested_section_dynamics": request.section_dynamics or "off",
+        "requested_modulate": request.modulate or "off",
         "resolved_chord_density": arrangement.chord_density,
         "resolved_melody_density": arrangement.melody_density,
         "resolved_chord_rhythm_style": arrangement.chord_rhythm_style,
@@ -413,7 +428,10 @@ def _write_arrangement(
         "resolved_drum_dynamics": arrangement.drum_dynamics,
         "resolved_harmony_spice": arrangement.harmony_spice,
         "resolved_section_dynamics": arrangement.section_dynamics,
+        "resolved_modulate": arrangement.modulate,
         "section_layout": [list(item) for item in arrangement.section_layout],
+        "modulation_start_bar": arrangement.modulation_start_bar,
+        "modulation_semitones": arrangement.modulation_semitones,
         "files": [file.name for file in files],
         "progression_label": arrangement.progression_label,
         "progression_degrees": arrangement.progression_degrees,
@@ -671,6 +689,9 @@ def _read_existing_arrangement(output_dir: Path, metadata: dict[str, object]) ->
         harmony_spice=str(metadata.get("resolved_harmony_spice") or "off"),
         section_dynamics=str(metadata.get("resolved_section_dynamics") or "off"),
         section_layout=[tuple(item) for item in (metadata.get("section_layout") or [])],
+        modulate=str(metadata.get("resolved_modulate") or "off"),
+        modulation_start_bar=metadata.get("modulation_start_bar") if isinstance(metadata.get("modulation_start_bar"), int) else None,
+        modulation_semitones=int(metadata.get("modulation_semitones") or 0),
     )
 
 
@@ -725,6 +746,7 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         drum_dynamics=_optional_string(load_batch_meta(batch_dir).get("drum_dynamics")) or _optional_string(metadata.get("requested_drum_dynamics")),
         harmony_spice=_optional_string(load_batch_meta(batch_dir).get("harmony_spice")) or _optional_string(metadata.get("requested_harmony_spice")),
         section_dynamics=_optional_string(load_batch_meta(batch_dir).get("section_dynamics")) or _optional_string(metadata.get("requested_section_dynamics")),
+        modulate=_optional_string(load_batch_meta(batch_dir).get("modulate")) or _optional_string(metadata.get("requested_modulate")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -751,6 +773,7 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
             drum_dynamics=request.drum_dynamics,
             harmony_spice=request.harmony_spice,
             section_dynamics=request.section_dynamics,
+            modulate=request.modulate,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -787,6 +810,9 @@ def _reroll_harmony_bar(batch_dir: Path, selected: dict[str, object], metadata: 
         harmony_spice=current.harmony_spice,
         section_dynamics=current.section_dynamics,
         section_layout=current.section_layout,
+        modulate=current.modulate,
+        modulation_start_bar=current.modulation_start_bar,
+        modulation_semitones=current.modulation_semitones,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -818,6 +844,7 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         drum_dynamics=_optional_string(batch_meta.get("drum_dynamics")) or _optional_string(metadata.get("requested_drum_dynamics")),
         harmony_spice=_optional_string(batch_meta.get("harmony_spice")) or _optional_string(metadata.get("requested_harmony_spice")),
         section_dynamics=_optional_string(batch_meta.get("section_dynamics")) or _optional_string(metadata.get("requested_section_dynamics")),
+        modulate=_optional_string(batch_meta.get("modulate")) or _optional_string(metadata.get("requested_modulate")),
         seed=_optional_int_value(metadata.get("candidate_seed")),
         output_dir=batch_dir,
     )
@@ -844,6 +871,7 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
             drum_dynamics=request.drum_dynamics,
             harmony_spice=request.harmony_spice,
             section_dynamics=request.section_dynamics,
+            modulate=request.modulate,
             seed=base_seed + attempt * 313,
             output_dir=request.output_dir,
         )
@@ -878,6 +906,9 @@ def _reroll_melody_bar(batch_dir: Path, selected: dict[str, object], metadata: d
         harmony_spice=current.harmony_spice,
         section_dynamics=current.section_dynamics,
         section_layout=current.section_layout,
+        modulate=current.modulate,
+        modulation_start_bar=current.modulation_start_bar,
+        modulation_semitones=current.modulation_semitones,
     )
     result = _write_arrangement(
         Path(str(selected.get("output_dir"))),
@@ -942,5 +973,6 @@ def _refresh_batch_candidate(batch_meta: dict[str, object], result: GenerationRe
             candidate["resolved_drum_dynamics"] = result.metadata.get("resolved_drum_dynamics")
             candidate["resolved_harmony_spice"] = result.metadata.get("resolved_harmony_spice")
             candidate["resolved_section_dynamics"] = result.metadata.get("resolved_section_dynamics")
+            candidate["resolved_modulate"] = result.metadata.get("resolved_modulate")
             candidate["bars"] = result.metadata.get("bars")
             break

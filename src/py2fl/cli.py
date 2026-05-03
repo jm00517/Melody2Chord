@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--drum-dynamics", choices=["off", "low", "med", "high", "auto"], default="off", help="Drum accent curve, ghost notes, and end-of-phrase fills. Default: off")
     generate_parser.add_argument("--harmony-spice", choices=["off", "low", "med", "high", "auto"], default="off", help="Secondary dominants and borrowed chords sprinkled into the progression. Default: off")
     generate_parser.add_argument("--section-dynamics", choices=["off", "low", "med", "high", "auto"], default="off", help="Verse/chorus contrast (chorus melody +1 octave, louder drums, etc.). Default: off")
+    generate_parser.add_argument("--modulate", choices=["off", "low", "med", "high", "auto"], default="off", help="Transpose the last quarter of the track up by 2 (low/med) or 5 (high) semitones. Requires bars >= 16. Default: off")
     generate_parser.add_argument("--seed", type=int, help="Random seed for reproducible output.")
     generate_parser.add_argument("--count", type=int, default=1, help="Number of candidate options to generate.")
     generate_parser.add_argument("--out", type=Path, default=Path("exports"), help="Base output directory.")
@@ -63,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             drum_dynamics=args.drum_dynamics,
             harmony_spice=args.harmony_spice,
             section_dynamics=args.section_dynamics,
+            modulate=args.modulate,
             seed=args.seed,
             output_dir=args.out,
         )
