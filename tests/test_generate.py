@@ -13,7 +13,7 @@ def test_generate_from_text(tmp_path: Path) -> None:
     result = generate_song(GenerationRequest(text="dark trap anthem", bars=4, seed=7, output_dir=tmp_path))
     assert result.metadata["input_mode"] == "text"
     assert result.metadata["tempo"] == 140
-    assert len(result.files) == 6
+    assert len(result.files) == 7
     assert result.metadata["full_progression_text"]
     assert len(result.metadata["bar_summary"]) == 4
     assert (result.output_dir / "full_arrangement.mid").exists()

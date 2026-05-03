@@ -396,6 +396,11 @@ def _write_arrangement(
     write_midi(full_arrangement, list(track_map.values()), arrangement.tempo_bpm)
     files.append(full_arrangement)
 
+    from .reaper import write_reaper_project
+    rpp_path = write_reaper_project(run_dir, tempo=arrangement.tempo_bpm, bars=arrangement.bars)
+    if rpp_path is not None:
+        files.append(rpp_path)
+
     mode = _input_mode(request)
     metadata = {
         "input_mode": mode,

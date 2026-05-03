@@ -58,6 +58,7 @@ Each generated candidate folder contains:
 - `bass.mid`
 - `drums.mid`
 - `full_arrangement.mid`
+- `arrangement.rpp` (REAPER project — opens the four MIDI files into four pre-routed tracks)
 - `meta.json`
 
 When generating more than one candidate, `py2fl` also creates a batch folder with:
@@ -416,6 +417,17 @@ batch = generate_candidates(
     count=4,
 )
 ```
+
+## REAPER Workflow
+
+Each candidate folder also contains an `arrangement.rpp` REAPER project file
+that points to the four MIDI files in the same folder. Open it directly in
+REAPER and you get four pre-routed tracks (`Melody`, `Chords`, `Bass`,
+`Drums`) at the project's tempo, ready to play.
+
+If the MIDI items show up empty in some REAPER builds, drag the `.mid` files
+onto the existing tracks manually — they live in the same folder. The `.rpp`
+is plain text so it is easy to inspect or hand-edit.
 
 ## FL Studio Workflow
 
