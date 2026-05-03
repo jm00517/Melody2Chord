@@ -394,7 +394,7 @@ def test_web_chord_page_renders(tmp_path: Path) -> None:
     }, start_response)).decode("utf-8")
 
     assert captured["status"] == "200 OK"
-    assert "Chord In. Melody Out." in body
+    assert "Melody from Chords" in body
     assert "Generate Melodies" in body
     assert "1-5-6-4" in body
 

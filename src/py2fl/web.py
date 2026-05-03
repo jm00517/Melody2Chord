@@ -12,6 +12,14 @@ import uuid
 from wsgiref.simple_server import make_server
 
 from . import audio as audio_module
+from . import settings as settings_module
+from .i18n import (
+    COOKIE_NAME as LANG_COOKIE_NAME,
+    SUPPORTED_LANGS,
+    lang_from_environ,
+    normalize_lang,
+    t as translate,
+)
 from .audio import (
     FluidsynthMissing,
     PREVIEW_DIRNAME,
@@ -58,6 +66,11 @@ class Py2FLWebApp:
                 os.environ.setdefault(audio_module.ENV_SOUNDFONT, str(sf_path))
         if fluidsynth_binary is not None:
             os.environ.setdefault(audio_module.ENV_FLUIDSYNTH, fluidsynth_binary)
+        settings_module.apply_to_environment()
+        self._current_lang = "en"
+
+    def t(self, key: str) -> str:
+        return translate(key, self._current_lang)
 
     def _resolved_soundfont(self) -> Path | None:
         return resolve_soundfont(self._soundfont_explicit)
@@ -71,6 +84,10 @@ class Py2FLWebApp:
     def __call__(self, environ: dict, start_response: Callable):
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/")
+        self._current_lang = lang_from_environ(environ)
+
+        if method == "POST" and path == "/lang":
+            return self._handle_lang_toggle(environ, start_response)
 
         if method == "GET" and path == "/":
             return self._respond_html(start_response, "200 OK", self._render_page())
@@ -146,6 +163,21 @@ class Py2FLWebApp:
                 return self._respond_html(start_response, "200 OK", body)
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "GET" and path == "/settings":
+            return self._respond_html(start_response, "200 OK", self._render_settings_page(environ=environ))
+
+        if method == "POST" and path == "/settings/save":
+            try:
+                return self._handle_settings_save(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_settings_page(error=str(exc)))
+
+        if method == "POST" and path == "/settings/clear":
+            try:
+                return self._handle_settings_clear(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_settings_page(error=str(exc)))
 
         if method == "POST" and path == "/llm/suggest-chords":
             try:
@@ -363,10 +395,11 @@ class Py2FLWebApp:
         if entry is None:
             raise ValueError(f"library entry not found: {entry_id}")
         state = _state_from_library_entry(entry)
+        info_text = self.t("lib_loaded_message").format(name=entry.get("name") or entry_id)
         if entry.get("ui_mode") == "melody_from_chords":
-            body = self._render_chords_page(form_state=state, info=f"Loaded controls from '{entry.get('name') or entry_id}'. Adjust if needed and generate.")
+            body = self._render_chords_page(form_state=state, info=info_text)
         else:
-            body = self._render_page(form_state=state, info=f"Loaded controls from '{entry.get('name') or entry_id}'. Adjust if needed and generate.")
+            body = self._render_page(form_state=state, info=info_text)
         return self._respond_html(start_response, "200 OK", body)
 
     def _handle_library_delete(self, environ: dict, start_response: Callable):
@@ -377,8 +410,125 @@ class Py2FLWebApp:
         library_delete_entry(entry_id, self.library_dir)
         return self._redirect(start_response, "/library")
 
+    def _handle_settings_save(self, environ: dict, start_response: Callable):
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        api_key = _optional_text(form.getfirst("gemini_api_key")) or ""
+        persist = form.getfirst("persist") == "1"
+        if not api_key:
+            raise ValueError("Enter a Gemini API key.")
+        os.environ["GEMINI_API_KEY"] = api_key
+        if persist:
+            settings_module.save_config({settings_module.KEY_GEMINI_API_KEY: api_key})
+        return self._redirect(start_response, "/settings?saved=1")
+
+    def _handle_settings_clear(self, environ: dict, start_response: Callable):
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("GOOGLE_API_KEY", None)
+        settings_module.clear_config_key(settings_module.KEY_GEMINI_API_KEY)
+        return self._redirect(start_response, "/settings?cleared=1")
+
+    def _render_settings_page(self, error: str | None = None, environ: dict | None = None) -> str:
+        query = parse_qs((environ or {}).get("QUERY_STRING", ""))
+        env_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        masked = settings_module.mask_secret(env_key) if env_key else ""
+        persisted = bool(settings_module.load_config().get(settings_module.KEY_GEMINI_API_KEY))
+        config_path_text = str(settings_module.config_path())
+        notice = ""
+        if error:
+            notice = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
+        status_lines = []
+        if env_key:
+            status_lines.append(f"<strong>{html.escape(self.t('settings_active'))}:</strong> <code>{html.escape(masked)}</code>")
+        else:
+            status_lines.append(f"<strong>{html.escape(self.t('settings_active'))}:</strong> <em>{html.escape(self.t('settings_not_set'))}</em>")
+        if persisted:
+            status_lines.append(f"<strong>{html.escape(self.t('settings_disk'))}:</strong> {html.escape(self.t('settings_yes'))} — {html.escape(config_path_text)}")
+        else:
+            status_lines.append(f"<strong>{html.escape(self.t('settings_disk'))}:</strong> {html.escape(self.t('settings_no'))}")
+        clear_form = ""
+        if env_key or persisted:
+            clear_form = f"""
+            <form method="post" action="/settings/clear" onsubmit="return confirm('{self.t('settings_clear_confirm')}');" style="margin-top: 10px;">
+              <button type="submit" class="btn danger">{html.escape(self.t('settings_btn_clear'))}</button>
+            </form>
+            """
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{TITLE} — Settings</title>
+  <style>
+    body {{ margin: 0; font-family: Georgia, "Times New Roman", serif; background: #f1ede3; color: #1f1a14; min-height: 100vh; }}
+    .shell {{ max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }}
+    .panel {{ background: rgba(255,255,255,0.82); border: 1px solid rgba(31,26,20,0.15); border-radius: 24px; padding: 22px; box-shadow: 0 24px 60px rgba(73, 48, 25, 0.12); margin-bottom: 18px; }}
+    h1 {{ margin: 0 0 8px; font-size: 36px; }}
+    label {{ display: grid; gap: 8px; font-size: 14px; color: #6d614e; }}
+    input[type=password], input[type=text] {{ width: 100%; padding: 12px 14px; border-radius: 14px; border: 1px solid rgba(31,26,20,0.14); background: #fffaf0; font: inherit; box-sizing: border-box; }}
+    input[type=checkbox] {{ margin-right: 6px; }}
+    button, .btn {{ border: 0; border-radius: 999px; padding: 10px 18px; background: linear-gradient(135deg, #b24a2b, #d67b3d); color: white; font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; }}
+    .btn.danger {{ background: linear-gradient(135deg, #6b2018, #8a3324); }}
+    .status {{ display: grid; gap: 6px; font-size: 14px; line-height: 1.6; }}
+    .status code {{ background: rgba(178,74,43,0.08); padding: 2px 8px; border-radius: 6px; }}
+    .topbar a {{ color: #7f2f18; text-decoration: none; font-weight: 700; }}
+    .saved-banner {{ background: rgba(54, 91, 61, 0.18); color: #2e4a2e; border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; }}
+    .hint {{ color: #6d614e; font-size: 13px; line-height: 1.5; }}
+    .hint a {{ color: #7f2f18; }}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    {_lang_toggle_html(self._current_lang, "/settings")}
+    <div class="topbar"><a href="/">{html.escape(self.t('back_to_studio'))}</a></div>
+    <h1>{html.escape(self.t('settings_heading'))}</h1>
+    {self._settings_query_banner(query)}
+    {notice}
+    <section class="panel">
+      <h2>{html.escape(self.t('settings_section_gemini'))}</h2>
+      <p class="hint">{html.escape(self.t('settings_hint_pre'))}<code>{html.escape(self.t('btn_suggest'))}</code>{html.escape(self.t('settings_hint_mid'))}<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a>{html.escape(self.t('settings_hint_post'))}</p>
+      <div class="status">{('<br>'.join(status_lines))}</div>
+      <form method="post" action="/settings/save" style="margin-top: 18px; display: grid; gap: 14px;">
+        <label>
+          {html.escape(self.t('settings_label_apikey'))}
+          <input type="password" name="gemini_api_key" placeholder="{html.escape(self.t('settings_apikey_placeholder'))}" autocomplete="off" required>
+        </label>
+        <label style="flex-direction: row; align-items: center;">
+          <input type="checkbox" name="persist" value="1">
+          {html.escape(self.t('settings_label_persist_pre'))}<code>{html.escape(config_path_text)}</code>{html.escape(self.t('settings_label_persist_post'))}
+        </label>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="submit">{html.escape(self.t('settings_btn_save'))}</button>
+        </div>
+      </form>
+      {clear_form}
+      <p class="hint" style="margin-top: 14px;">{html.escape(self.t('settings_security_note'))}</p>
+    </section>
+  </main>
+</body>
+</html>"""
+
+    def _settings_query_banner(self, query: dict) -> str:
+        if query.get("saved"):
+            return f'<div class="saved-banner">{html.escape(self.t("settings_saved_banner"))}</div>'
+        if query.get("cleared"):
+            return f'<div class="saved-banner">{html.escape(self.t("settings_cleared_banner"))}</div>'
+        return ""
+
     def _redirect(self, start_response: Callable, location: str):
         start_response("303 See Other", [("Location", location), ("Content-Length", "0")])
+        return [b""]
+
+    def _handle_lang_toggle(self, environ: dict, start_response: Callable):
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        lang = normalize_lang(_optional_text(form.getfirst("lang")))
+        return_to = _optional_text(form.getfirst("return_to")) or "/"
+        if not return_to.startswith("/"):
+            return_to = "/"
+        cookie_value = f"{LANG_COOKIE_NAME}={lang}; Path=/; Max-Age=31536000; SameSite=Lax"
+        start_response(
+            "303 See Other",
+            [("Location", return_to), ("Set-Cookie", cookie_value), ("Content-Length", "0")],
+        )
         return [b""]
 
     def _handle_llm_suggest(self, environ: dict, chords_mode: bool = False) -> str:
@@ -442,11 +592,11 @@ class Py2FLWebApp:
         if error:
             error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
         if not entries:
-            rows_html = '<section class="empty-state">No saved candidates yet. Open a generated option and press <strong>★ Save to Library</strong>.</section>'
+            rows_html = f'<section class="empty-state">{self.t("lib_empty")}</section>'
         else:
             rows = []
             for entry in entries:
-                rows.append(_library_entry_row(entry))
+                rows.append(_library_entry_row(entry, self))
             rows_html = '<section class="library-grid">' + "".join(rows) + "</section>"
         return f"""<!doctype html>
 <html lang="en">
@@ -481,12 +631,13 @@ class Py2FLWebApp:
 </head>
 <body>
   <main class="shell">
+    {_lang_toggle_html(self._current_lang, "/library")}
     <div class="topbar">
       <div>
-        <h1>Library</h1>
-        <p class="lead">Saved candidates live here. Each entry is a frozen copy of the candidate folder, safe to keep even after <code>{html.escape(str(self.output_dir))}</code> is cleaned out.</p>
+        <h1>{html.escape(self.t('lib_heading'))}</h1>
+        <p class="lead">{html.escape(self.t('lib_lead_pre'))}<code>{html.escape(str(self.output_dir))}</code>{html.escape(self.t('lib_lead_post'))}</p>
       </div>
-      <a href="/">← Back to Studio</a>
+      <a href="/">{html.escape(self.t('back_to_studio'))}</a>
     </div>
     {error_html}
     {rows_html}
@@ -542,37 +693,37 @@ class Py2FLWebApp:
 </head>
 <body>
   <main class="shell">
-    <p><a href="/library">← Library</a></p>
+    {_lang_toggle_html(self._current_lang, f"/library/{entry_id}")}
+    <p><a href="/library">← {html.escape(self.t('lib_heading'))}</a></p>
     <section class="panel">
       <h1>{html.escape(str(entry.get('name') or entry_id))}</h1>
       <p class="progression">{html.escape(progression)}</p>
       <div class="meta-grid">
-        <div class="meta-card"><span>Saved</span><strong>{html.escape(str(entry.get('saved_at') or '-'))}</strong></div>
-        <div class="meta-card"><span>Input mode</span><strong>{html.escape(str(entry.get('input_mode') or '-'))}</strong></div>
-        <div class="meta-card"><span>Tempo</span><strong>{html.escape(str(entry.get('tempo') or '-'))}</strong></div>
-        <div class="meta-card"><span>Key</span><strong>{html.escape(str(entry.get('key') or '-'))}</strong></div>
-        <div class="meta-card"><span>Bars</span><strong>{html.escape(str(entry.get('bars') or '-'))}</strong></div>
-        <div class="meta-card"><span>Genre</span><strong>{html.escape(str(entry.get('genre') or '-'))}</strong></div>
-        <div class="meta-card"><span>Seed</span><strong>{html.escape(str(entry.get('candidate_seed') or '-'))}</strong></div>
+        <div class="meta-card"><span>{html.escape(self.t('lib_saved_at'))}</span><strong>{html.escape(str(entry.get('saved_at') or '-'))}</strong></div>
+        <div class="meta-card"><span>{html.escape(self.t('lib_mode'))}</span><strong>{html.escape(str(entry.get('input_mode') or '-'))}</strong></div>
+        <div class="meta-card"><span>{html.escape(self.t('label_tempo'))}</span><strong>{html.escape(str(entry.get('tempo') or '-'))}</strong></div>
+        <div class="meta-card"><span>{html.escape(self.t('label_key'))}</span><strong>{html.escape(str(entry.get('key') or '-'))}</strong></div>
+        <div class="meta-card"><span>{html.escape(self.t('label_bars'))}</span><strong>{html.escape(str(entry.get('bars') or '-'))}</strong></div>
+        <div class="meta-card"><span>{html.escape(self.t('label_genre'))}</span><strong>{html.escape(str(entry.get('genre') or '-'))}</strong></div>
+        <div class="meta-card"><span>{html.escape(self.t('label_seed'))}</span><strong>{html.escape(str(entry.get('candidate_seed') or '-'))}</strong></div>
       </div>
     </section>
     <section class="panel">
-      <h2>Controls</h2>
+      <h2>{html.escape(self.t('lib_controls'))}</h2>
       <div class="meta-grid">{controls_html}</div>
     </section>
     <section class="panel">
-      <h2>Files</h2>
+      <h2>{html.escape(self.t('files_actions'))}</h2>
       <ul>{files_html}</ul>
-      <p>Preview: <a class="btn ghost" href="{html.escape(preview_url)}" download>Download {html.escape(str(preview_file))}</a></p>
-      {_audio_preview_panel(folder, return_to=f"/library/{quote(entry_id)}")}
+      {_audio_preview_panel(folder, return_to=f"/library/{quote(entry_id)}", app=self)}
       <div class="actions">
         <form method="post" action="/library/continue">
           <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
-          <button type="submit">Continue from this</button>
+          <button type="submit">{html.escape(self.t('lib_continue'))}</button>
         </form>
-        <form method="post" action="/library/delete" onsubmit="return confirm('Delete this saved entry? The folder under library/ will be removed.');">
+        <form method="post" action="/library/delete" onsubmit="return confirm('{self.t('lib_confirm_delete')}');">
           <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
-          <button type="submit" class="btn danger">Delete</button>
+          <button type="submit" class="btn danger">{html.escape(self.t('lib_delete'))}</button>
         </form>
       </div>
     </section>
@@ -642,7 +793,7 @@ class Py2FLWebApp:
         if error:
             error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
         if info:
-            error_html += f'<section class="panel"><h2>From Library</h2><p>{html.escape(info)}</p></section>'
+            error_html += f'<section class="panel"><h2>{html.escape(self.t("from_library_heading"))}</h2><p>{html.escape(info)}</p></section>'
 
         reroll_controls = ""
         comparison_bar = ""
@@ -651,12 +802,12 @@ class Py2FLWebApp:
         if candidates:
             reroll_controls = f"""
             <div class="actions">
-              <form method="post" action="/generate">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="all"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit">Reroll All</button></form>
-              <form method="post" action="/generate">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="chords"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit" class="secondary">Reroll Chords</button></form>
+              <form method="post" action="/generate">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="all"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit">{html.escape(self.t('reroll_all'))}</button></form>
+              <form method="post" action="/generate">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="chords"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit" class="secondary">{html.escape(self.t('reroll_chords'))}</button></form>
             </div>
             """
-            comparison_bar = '<section class="candidate-overview"><div class="overview-head"><h2>Candidate Overview</h2><p>Compare the full harmonic path first, then open one option in detail below.</p></div><div class="candidate-tabs">' + ''.join(_candidate_tab(result, active_index) for result in candidates) + '</div></section>'
-            candidate_details = '<section class="candidate-details">' + ''.join(_candidate_detail(result, batch_meta, active_index) for result in candidates) + '</section>'
+            comparison_bar = f'<section class="candidate-overview"><div class="overview-head"><h2>{html.escape(self.t("candidate_overview_heading"))}</h2><p>{html.escape(self.t("candidate_overview_lead"))}</p></div><div class="candidate-tabs">' + ''.join(_candidate_tab(result, active_index) for result in candidates) + '</div></section>'
+            candidate_details = '<section class="candidate-details">' + ''.join(_candidate_detail(result, batch_meta, active_index, self) for result in candidates) + '</section>'
 
         mute_controls = ''.join(
             f'<button type="button" class="ghost mute-toggle" data-track-toggle="{track_name}" aria-pressed="false">Mute {track_name}</button>'
@@ -787,85 +938,92 @@ class Py2FLWebApp:
     .save-form {{ display: flex; gap: 8px; align-items: center; }}
     .save-form input {{ padding: 8px 12px; border-radius: 12px; border: 1px solid rgba(31,26,20,0.14); background: var(--surface-strong); font: inherit; flex: 1; min-width: 140px; }}
     .form-actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+    .topnav {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }}
+    .topnav-links {{ display: flex; gap: 14px; }}
+    .topnav-link {{ color: var(--accent-dark); text-decoration: none; font-weight: 700; font-size: 14px; }}
+    .topnav-link:hover {{ text-decoration: underline; }}
+    .lang-form {{ margin: 0; }}
+    .lang-btn {{ padding: 6px 14px; font-size: 12px; background: rgba(178,74,43,0.1); color: var(--accent-dark); border: 1px solid rgba(178,74,43,0.25); }}
     @media (max-width: 1100px) {{ .detail-hero {{ grid-template-columns: 1fr; }} .detail-grid {{ grid-template-columns: 1fr; }} .layout {{ grid-template-columns: 1fr; }} }}
     @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} .mute-grid {{ grid-template-columns: 1fr; }} .candidate-tabs {{ grid-template-columns: 1fr; }} .timeline-grid {{ grid-template-columns: 1fr; }} .detail-meta {{ grid-template-columns: 1fr; }} .overview-head {{ display: grid; }} .progression-text {{ font-size: 28px; }} }}
   </style>
 </head>
 <body>
   <main class="shell">
+    {_lang_toggle_html(self._current_lang, "/")}
     <header class="hero">
-      <div class="eyebrow">FL Studio MIDI Generator</div>
-      <h1>Generate. Compare. Listen. Choose.</h1>
-      <p class="lead">Create multiple arrangements from the same idea, compare the full progression at a glance, then inspect one candidate in detail with melody-to-chord matching all the way through.</p>
+      <div class="eyebrow">{html.escape(self.t('hero_eyebrow'))}</div>
+      <h1>{html.escape(self.t('hero_title'))}</h1>
+      <p class="lead">{html.escape(self.t('hero_lead'))}</p>
     </header>
     <section class="layout">
       <section class="panel">
-        <h2>Create Candidate Set</h2>
+        <h2>{html.escape(self.t('panel_create'))}</h2>
         <form method="post" action="/generate" enctype="multipart/form-data">
           <label>
-            Text Prompt or Lyrics
-            <textarea name="text" placeholder="Example: dreamy rnb night drive with airy chords">{html.escape(state.get("text", ""))}</textarea>
+            {html.escape(self.t('label_text'))}
+            <textarea name="text" placeholder="{html.escape(self.t('placeholder_text'))}">{html.escape(state.get("text", ""))}</textarea>
           </label>
           <label>
-            Melody MIDI Upload
+            {html.escape(self.t('label_melody_upload'))}
             <input type="file" name="melody_midi" accept=".mid,.midi">
           </label>
           <div class="grid">
-            <label>Tempo<input type="number" name="tempo" min="30" max="300" placeholder="auto" value="{html.escape(state.get("tempo", ""))}"></label>
-            <label>Key<input type="text" name="key" placeholder="Example: F#, A minor" value="{html.escape(state.get("key", ""))}"></label>
-            <label>Genre<input type="text" name="genre" placeholder="Example: trap, rnb, house" value="{html.escape(state.get("genre", ""))}"></label>
-            <label>Bars<input type="number" name="bars" min="1" max="128" placeholder="auto" value="{html.escape(state.get("bars", ""))}"></label>
-            {_select_field_html("Chord Density", "chord_density", state.get("chord_density", "auto"), [("auto", "Auto"), ("1", "1 per bar"), ("2", "2 per bar"), ("3", "3 per bar")])}
-            {_select_field_html("Melody Density", "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
-            {_select_field_html("Chord Rhythm", "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
-            {_select_field_html("Humanize", "humanize", state.get("humanize", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Swing", "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Drum Dynamics", "drum_dynamics", state.get("drum_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Harmony Spice", "harmony_spice", state.get("harmony_spice", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Section Dynamics", "section_dynamics", state.get("section_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Modulate", "modulate", state.get("modulate", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
-            <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
+            <label>{html.escape(self.t('label_tempo'))}<input type="number" name="tempo" min="30" max="300" placeholder="{html.escape(self.t('placeholder_auto'))}" value="{html.escape(state.get("tempo", ""))}"></label>
+            <label>{html.escape(self.t('label_key'))}<input type="text" name="key" placeholder="{html.escape(self.t('placeholder_key'))}" value="{html.escape(state.get("key", ""))}"></label>
+            <label>{html.escape(self.t('label_genre'))}<input type="text" name="genre" placeholder="{html.escape(self.t('placeholder_genre'))}" value="{html.escape(state.get("genre", ""))}"></label>
+            <label>{html.escape(self.t('label_bars'))}<input type="number" name="bars" min="1" max="128" placeholder="{html.escape(self.t('placeholder_auto'))}" value="{html.escape(state.get("bars", ""))}"></label>
+            {_select_field_html(self.t('label_chord_density'), "chord_density", state.get("chord_density", "auto"), [("auto", "Auto"), ("1", "1 per bar"), ("2", "2 per bar"), ("3", "3 per bar")])}
+            {_select_field_html(self.t('label_melody_density'), "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
+            {_select_field_html(self.t('label_chord_rhythm'), "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
+            {_select_field_html(self.t('label_humanize'), "humanize", state.get("humanize", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_swing'), "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_drum_dynamics'), "drum_dynamics", state.get("drum_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_harmony_spice'), "harmony_spice", state.get("harmony_spice", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_section_dynamics'), "section_dynamics", state.get("section_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_modulate'), "modulate", state.get("modulate", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            <label>{html.escape(self.t('label_seed'))}<input type="number" name="seed" placeholder="{html.escape(self.t('placeholder_optional'))}" value="{html.escape(state.get("seed", ""))}"></label>
+            <label>{html.escape(self.t('label_options'))}<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
           <input type="hidden" name="melody_source" value="{html.escape(state.get("melody_source", ""))}">
-          <p class="hint">Enter text, a melody MIDI file, or both. The result view now shows the full chord path from start to finish plus a bar-by-bar melody match timeline.</p>
+          <p class="hint">{html.escape(self.t('hint_main'))}</p>
           <div class="form-actions">
-            <button type="submit">Generate Options</button>
-            <button type="submit" class="ghost" formaction="/llm/suggest" formenctype="application/x-www-form-urlencoded">{'✨'} Suggest from Text</button>
+            <button type="submit">{html.escape(self.t('btn_generate'))}</button>
+            <button type="submit" class="ghost" formaction="/llm/suggest" formenctype="application/x-www-form-urlencoded">{html.escape(self.t('btn_suggest'))}</button>
           </div>
         </form>
       </section>
       <aside class="panel">
-        <h2>Session Controls</h2>
+        <h2>{html.escape(self.t('panel_session'))}</h2>
         <div class="session-controls">
           <div class="control-block">
             <div class="volume-row">
-              <span class="volume-label">Preview Volume</span>
+              <span class="volume-label">{html.escape(self.t('preview_volume'))}</span>
               <span class="volume-value" id="volume-value">20%</span>
             </div>
             <input class="volume-slider" id="volume-slider" type="range" min="0" max="100" value="20">
           </div>
           <div class="control-block">
-            <div class="volume-label">Part Mutes</div>
+            <div class="volume-label">{html.escape(self.t('part_mutes'))}</div>
             <div class="mute-grid">{mute_controls}</div>
           </div>
         </div>
         <div class="specs">
-          <div class="spec"><strong>Candidate overview</strong>Use the top comparison bar to scan every option's progression before opening one in detail.</div>
-          <div class="spec"><strong>Chord-to-melody mode</strong>Open <a href="/melody-from-chords">/melody-from-chords</a> to generate toplines from a fixed chord progression.</div>
-          <div class="spec"><strong>Library</strong>Save winning candidates with the ★ button on a candidate card and find them at <a href="/library">/library</a>.</div>
-          <div class="spec"><strong>Smart Suggestions</strong>Press <code>✨ Suggest from Text</code> to fill BPM/key/genre and the 9 controls from your prompt. Set <code>GEMINI_API_KEY</code> for LLM-powered suggestions; otherwise a rule-based fallback is used.</div>
-          <div class="spec"><strong>Harmony timeline</strong>Each detailed view shows bar-by-bar chords, representative melody pitches, and a simple match percentage.</div>
-          <div class="spec"><strong>Browser playback</strong>Each candidate previews its `full_arrangement.mid` file directly in the browser with a lightweight synth setup.</div>
-          <div class="spec"><strong>Saved selection</strong>`Select This` stores the chosen option in <code>{BATCH_META_FILENAME}</code> inside the batch folder.</div>
-          <div class="spec"><strong>Output root</strong>Files are written under {html.escape(str(self.output_dir))}, with batch folders and `option_01`, `option_02` style candidate directories.</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_overview_title'))}</strong>{html.escape(self.t('spec_overview_text'))}</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_chords_title'))}</strong>{html.escape(self.t('spec_chords_text_pre'))}<a href="/melody-from-chords">/melody-from-chords</a>{html.escape(self.t('spec_chords_text_post'))}</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_library_title'))}</strong>{html.escape(self.t('spec_library_text_pre'))}<a href="/library">/library</a>{html.escape(self.t('spec_library_text_post'))}</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_smart_title'))}</strong>{html.escape(self.t('spec_smart_text_pre'))}<code>{html.escape(self.t('btn_suggest'))}</code>{html.escape(self.t('spec_smart_text_mid'))}<a href="/settings">/settings</a>{html.escape(self.t('spec_smart_text_post'))}</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_timeline_title'))}</strong>{html.escape(self.t('spec_timeline_text'))}</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_playback_title'))}</strong>{html.escape(self.t('spec_playback_text'))}</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_selection_title'))}</strong>{html.escape(self.t('spec_selection_text_pre'))}<code>{BATCH_META_FILENAME}</code>{html.escape(self.t('spec_selection_text_post'))}</div>
+          <div class="spec"><strong>{html.escape(self.t('spec_output_title'))}</strong>{html.escape(self.t('spec_output_text_pre'))}{html.escape(str(self.output_dir))}{html.escape(self.t('spec_output_text_post'))}</div>
         </div>
       </aside>
     </section>
     {error_html}
     {reroll_controls}
     {comparison_bar}
-    {candidate_details or '<section class="empty-state">Generate a candidate set to see the large comparison view and the melody/chord timeline.</section>'}
+    {candidate_details or f'<section class="empty-state">{html.escape(self.t("empty_state"))}</section>'}
   </main>
   <script type="module">
     import * as Tone from 'https://cdn.jsdelivr.net/npm/tone@15.0.4/+esm';
@@ -1146,7 +1304,7 @@ class Py2FLWebApp:
         if error:
             error_html = f'<section class="panel error"><h2>Error</h2><p>{html.escape(error)}</p></section>'
         if info:
-            error_html += f'<section class="panel"><h2>From Library</h2><p>{html.escape(info)}</p></section>'
+            error_html += f'<section class="panel"><h2>{html.escape(self.t("from_library_heading"))}</h2><p>{html.escape(info)}</p></section>'
 
         reroll_controls = ""
         comparison_bar = ""
@@ -1155,12 +1313,12 @@ class Py2FLWebApp:
         if candidates:
             reroll_controls = f"""
             <div class="actions">
-              <form method="post" action="/generate-chords">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="all"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit">Reroll All</button></form>
-              <form method="post" action="/generate-chords">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="melody"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit" class="secondary">Reroll Melody</button></form>
+              <form method="post" action="/generate-chords">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="all"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit">{html.escape(self.t('reroll_all'))}</button></form>
+              <form method="post" action="/generate-chords">{_hidden_state_fields(state)}<input type="hidden" name="reroll_scope" value="melody"><input type="hidden" name="seed_offset" value="{uuid.uuid4().int % 1_000_000}"><button type="submit" class="secondary">{html.escape(self.t('reroll_melody'))}</button></form>
             </div>
             """
-            comparison_bar = '<section class="candidate-overview"><div class="overview-head"><h2>Melody Candidates</h2><p>Compare toplines written against the same chord path, then open one candidate in detail below.</p></div><div class="candidate-tabs">' + ''.join(_candidate_tab(result, active_index) for result in candidates) + '</div></section>'
-            candidate_details = '<section class="candidate-details">' + ''.join(_candidate_detail(result, batch_meta, active_index) for result in candidates) + '</section>'
+            comparison_bar = f'<section class="candidate-overview"><div class="overview-head"><h2>{html.escape(self.t("candidate_overview_heading"))}</h2><p>{html.escape(self.t("candidate_overview_lead"))}</p></div><div class="candidate-tabs">' + ''.join(_candidate_tab(result, active_index) for result in candidates) + '</div></section>'
+            candidate_details = '<section class="candidate-details">' + ''.join(_candidate_detail(result, batch_meta, active_index, self) for result in candidates) + '</section>'
 
         mute_controls = ''.join(
             f'<button type="button" class="ghost mute-toggle" data-track-toggle="{track_name}" aria-pressed="false">Mute {track_name}</button>'
@@ -1221,50 +1379,51 @@ class Py2FLWebApp:
 </head>
 <body>
   <main class="shell">
+    {_lang_toggle_html(self._current_lang, "/melody-from-chords")}
     <header class="hero">
-      <div class="eyebrow">FL Studio Melody Writer</div>
-      <h1>Chord In. Melody Out.</h1>
-      <p class="lead">Feed in a chord progression, generate multiple topline candidates, compare their contour, then reroll specific bars without changing the harmony.</p>
-      <p><a href="/">Back to Arrangement Generator</a></p>
+      <div class="eyebrow">{html.escape(self.t('hero_eyebrow'))}</div>
+      <h1>{html.escape(self.t('from_chords_title'))}</h1>
+      <p class="lead">{html.escape(self.t('from_chords_lead'))}</p>
+      <p><a href="/">{html.escape(self.t('back_to_studio'))}</a></p>
     </header>
     <section class="layout">
       <section class="panel">
-        <h2>Generate Melody Candidates</h2>
+        <h2>{html.escape(self.t('panel_create'))}</h2>
         <form method="post" action="/generate-chords">
           <label>
-            Chord Progression
-            <textarea name="chord_progression" placeholder="Examples: 1-5-6-4 or Am-F-C-G">{html.escape(state.get("chord_progression", ""))}</textarea>
+            {html.escape(self.t('label_chord_progression'))}
+            <textarea name="chord_progression" placeholder="{html.escape(self.t('placeholder_chord_progression'))}">{html.escape(state.get("chord_progression", ""))}</textarea>
           </label>
           <label>
-            Optional Style Prompt
-            <textarea name="text" placeholder="Example: dreamy rnb topline with wide phrases">{html.escape(state.get("text", ""))}</textarea>
+            {html.escape(self.t('label_text'))}
+            <textarea name="text" placeholder="{html.escape(self.t('placeholder_text'))}">{html.escape(state.get("text", ""))}</textarea>
           </label>
           <div class="grid">
-            <label>Tempo<input type="number" name="tempo" min="30" max="300" placeholder="auto" value="{html.escape(state.get("tempo", ""))}"></label>
-            <label>Key<input type="text" name="key" placeholder="Optional for degree input, example: A minor" value="{html.escape(state.get("key", ""))}"></label>
-            <label>Genre<input type="text" name="genre" placeholder="Example: trap, rnb, house" value="{html.escape(state.get("genre", ""))}"></label>
-            <label>Bars<input type="number" name="bars" min="1" max="128" placeholder="default: token count" value="{html.escape(state.get("bars", ""))}"></label>
-            {_select_field_html("Chord Density", "chord_density", state.get("chord_density", "auto"), [("auto", "Auto"), ("1", "1 per bar"), ("2", "2 per bar"), ("3", "3 per bar")])}
-            {_select_field_html("Melody Density", "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
-            {_select_field_html("Chord Rhythm", "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
-            {_select_field_html("Humanize", "humanize", state.get("humanize", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Swing", "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Drum Dynamics", "drum_dynamics", state.get("drum_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Harmony Spice", "harmony_spice", state.get("harmony_spice", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Section Dynamics", "section_dynamics", state.get("section_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            {_select_field_html("Modulate", "modulate", state.get("modulate", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
-            <label>Seed<input type="number" name="seed" placeholder="optional" value="{html.escape(state.get("seed", ""))}"></label>
-            <label>Options<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
+            <label>{html.escape(self.t('label_tempo'))}<input type="number" name="tempo" min="30" max="300" placeholder="{html.escape(self.t('placeholder_auto'))}" value="{html.escape(state.get("tempo", ""))}"></label>
+            <label>{html.escape(self.t('label_key'))}<input type="text" name="key" placeholder="{html.escape(self.t('placeholder_key'))}" value="{html.escape(state.get("key", ""))}"></label>
+            <label>{html.escape(self.t('label_genre'))}<input type="text" name="genre" placeholder="{html.escape(self.t('placeholder_genre'))}" value="{html.escape(state.get("genre", ""))}"></label>
+            <label>{html.escape(self.t('label_bars'))}<input type="number" name="bars" min="1" max="128" placeholder="{html.escape(self.t('placeholder_auto'))}" value="{html.escape(state.get("bars", ""))}"></label>
+            {_select_field_html(self.t('label_chord_density'), "chord_density", state.get("chord_density", "auto"), [("auto", "Auto"), ("1", "1 per bar"), ("2", "2 per bar"), ("3", "3 per bar")])}
+            {_select_field_html(self.t('label_melody_density'), "melody_density", state.get("melody_density", "auto"), [("auto", "Auto"), ("sparse", "Sparse"), ("normal", "Normal"), ("dense", "Dense"), ("xdense", "X-Dense")])}
+            {_select_field_html(self.t('label_chord_rhythm'), "chord_rhythm_style", state.get("chord_rhythm_style", "auto"), [("auto", "Auto"), ("hold", "Hold"), ("stab", "Stab"), ("strum", "Strum")])}
+            {_select_field_html(self.t('label_humanize'), "humanize", state.get("humanize", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_swing'), "swing", state.get("swing", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_drum_dynamics'), "drum_dynamics", state.get("drum_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_harmony_spice'), "harmony_spice", state.get("harmony_spice", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_section_dynamics'), "section_dynamics", state.get("section_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            {_select_field_html(self.t('label_modulate'), "modulate", state.get("modulate", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            <label>{html.escape(self.t('label_seed'))}<input type="number" name="seed" placeholder="{html.escape(self.t('placeholder_optional'))}" value="{html.escape(state.get("seed", ""))}"></label>
+            <label>{html.escape(self.t('label_options'))}<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
-          <p class="hint">Supports both degree notation and named chords. One token equals one bar by default.</p>
+          <p class="hint">{html.escape(self.t('from_chords_hint'))}</p>
           <div class="form-actions">
-            <button type="submit">Generate Melodies</button>
-            <button type="submit" class="ghost" formaction="/llm/suggest-chords">{'✨'} Suggest from Text</button>
+            <button type="submit">{html.escape(self.t('btn_generate_melodies'))}</button>
+            <button type="submit" class="ghost" formaction="/llm/suggest-chords">{html.escape(self.t('btn_suggest'))}</button>
           </div>
         </form>
       </section>
       <aside class="panel">
-        <h2>Session Controls</h2>
+        <h2>{html.escape(self.t('panel_session'))}</h2>
         <div class="session-controls">
           <div class="control-block">
             <div><strong>Preview Volume</strong> <span id="volume-value">20%</span></div>
@@ -1532,7 +1691,9 @@ def _candidate_progress_header(result, batch_meta: dict[str, object] | None) -> 
     """
 
 
-def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index: int) -> str:
+def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index: int, app=None) -> str:
+    def _t(key: str) -> str:
+        return app.t(key) if app is not None else translate(key, "en")
     meta = result.metadata
     candidate_index = int(meta.get("candidate_index") or 1)
     active = candidate_index == active_index
@@ -1545,19 +1706,19 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
     timeline = _timeline_blocks(meta.get("bar_summary", []), batch_dir, candidate_index, preview_url_escaped, tempo, str(meta.get("bar_action_label", "Reroll Harmony")))
     selected_option = None if not batch_meta else batch_meta.get("selected_option")
     selected = selected_option == meta.get("candidate_index")
-    audio_panel = _audio_preview_panel(Path(result.output_dir), return_to="/", soundfont_label=None)
+    audio_panel = _audio_preview_panel(Path(result.output_dir), return_to="/", soundfont_label=None, app=app)
     default_save_name = str(meta.get("text") or meta.get("progression_label") or f"Option {candidate_index:02d}")[:60]
     select_form = f"""
       <form method="post" action="/select">
         <input type="hidden" name="batch_dir" value="{html.escape(str(batch_dir))}">
         <input type="hidden" name="candidate_index" value="{html.escape(str(meta.get('candidate_index')))}">
-        <button type="submit" class="select-btn {'secondary' if selected else ''}">Select This</button>
+        <button type="submit" class="select-btn {'secondary' if selected else ''}">{html.escape(_t('btn_select'))}</button>
       </form>
       <form method="post" action="/library/save" class="save-form">
         <input type="hidden" name="batch_dir" value="{html.escape(str(batch_dir))}">
         <input type="hidden" name="candidate_index" value="{html.escape(str(meta.get('candidate_index')))}">
-        <input type="text" name="name" placeholder="Save name" value="{html.escape(default_save_name)}" required>
-        <button type="submit" class="ghost">★ Save to Library</button>
+        <input type="text" name="name" placeholder="{html.escape(_t('save_name_placeholder'))}" value="{html.escape(default_save_name)}" required>
+        <button type="submit" class="ghost">{html.escape(_t('btn_save_to_library'))}</button>
       </form>
     """
     return f"""
@@ -1584,10 +1745,10 @@ def _candidate_detail(result, batch_meta: dict[str, object] | None, active_index
       </section>
       <section class="detail-grid">
         <div class="panel">
-          <h3>Files and actions</h3>
+          <h3>{html.escape(_t('files_actions'))}</h3>
           <div class="card-actions">
-            <button type="button" class="ghost" data-preview-url="{html.escape(preview_url)}">Play</button>
-            <button type="button" class="ghost" data-stop disabled>Stop</button>
+            <button type="button" class="ghost" data-preview-url="{html.escape(preview_url)}">{html.escape(_t('btn_play'))}</button>
+            <button type="button" class="ghost" data-stop disabled>{html.escape(_t('btn_stop'))}</button>
             {select_form}
           </div>
           <ul class="files">{file_list}</ul>
@@ -1694,7 +1855,31 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
     """
 
 
-def _audio_preview_panel(candidate_dir: Path, return_to: str, soundfont_label: str | None = None) -> str:
+def _lang_toggle_html(current: str, return_to: str) -> str:
+    other = "ko" if current == "en" else "en"
+    label = "한국어" if other == "ko" else "EN"
+    extra_links = (
+        '<a class="topnav-link" href="/library">Library</a>'
+        '<a class="topnav-link" href="/settings">Settings</a>'
+    )
+    if current == "ko":
+        extra_links = (
+            '<a class="topnav-link" href="/library">라이브러리</a>'
+            '<a class="topnav-link" href="/settings">설정</a>'
+        )
+    return f"""<div class="topnav">
+      <div class="topnav-links">{extra_links}</div>
+      <form method="post" action="/lang" class="lang-form">
+        <input type="hidden" name="lang" value="{other}">
+        <input type="hidden" name="return_to" value="{html.escape(return_to)}">
+        <button type="submit" class="lang-btn">{html.escape(label)}</button>
+      </form>
+    </div>"""
+
+
+def _audio_preview_panel(candidate_dir: Path, return_to: str, soundfont_label: str | None = None, app=None) -> str:
+    def _t(key: str) -> str:
+        return app.t(key) if app is not None else translate(key, "en")
     sf2 = resolve_soundfont()
     binary = resolve_fluidsynth_binary()
     ready = sf2 is not None and binary is not None
@@ -1715,12 +1900,12 @@ def _audio_preview_panel(candidate_dir: Path, return_to: str, soundfont_label: s
     label = soundfont_label or sf2.name
     if not has_mix:
         return f"""<div class="audio-panel">
-          <h4>Audio Preview</h4>
-          <p class="hint">SoundFont: <code>{html.escape(label)}</code>. Click to render WAV stems.</p>
+          <h4>{html.escape(_t('audio_preview_heading'))}</h4>
+          <p class="hint">{html.escape(_t('audio_hint_soundfont'))}: <code>{html.escape(label)}</code></p>
           <form method="post" action="/preview/render">
             <input type="hidden" name="candidate_dir" value="{html.escape(str(candidate_dir))}">
             <input type="hidden" name="return_to" value="{html.escape(return_to)}">
-            <button type="submit">Render Audio Preview</button>
+            <button type="submit">{html.escape(_t('btn_render_audio'))}</button>
           </form>
         </div>"""
     mix_url = f"/files?path={quote(str(mix_wav))}"
@@ -1735,18 +1920,20 @@ def _audio_preview_panel(candidate_dir: Path, return_to: str, soundfont_label: s
         <input type="hidden" name="candidate_dir" value="{html.escape(str(candidate_dir))}">
         <input type="hidden" name="return_to" value="{html.escape(return_to)}">
         <input type="hidden" name="force" value="1">
-        <button type="submit" class="ghost">Re-render</button>
+        <button type="submit" class="ghost">{html.escape(_t('btn_rerender'))}</button>
       </form>"""
     return f"""<div class="audio-panel">
-      <h4>Audio Preview</h4>
-      <p class="hint">SoundFont: <code>{html.escape(label)}</code></p>
+      <h4>{html.escape(_t('audio_preview_heading'))}</h4>
+      <p class="hint">{html.escape(_t('audio_hint_soundfont'))}: <code>{html.escape(label)}</code></p>
       <audio controls preload="metadata" src="{html.escape(mix_url)}"></audio>
       <div class="audio-stems">{''.join(stems_html)}</div>
       {rerender}
     </div>"""
 
 
-def _library_entry_row(entry: dict[str, object]) -> str:
+def _library_entry_row(entry: dict[str, object], app=None) -> str:
+    def _t(key: str) -> str:
+        return app.t(key) if app is not None else translate(key, "en")
     entry_id = str(entry.get("id") or "")
     name = str(entry.get("name") or entry_id)
     saved_at = str(entry.get("saved_at") or "-")
@@ -1763,30 +1950,31 @@ def _library_entry_row(entry: dict[str, object]) -> str:
     else:
         active_controls = []
     controls_summary = ", ".join(f"{k}: {v}" for k, v in active_controls) or "defaults"
+    text_block = html.escape(text) if text else _t('lib_no_text')
     return f"""
     <article class="panel lib-card">
       <h3>{html.escape(name)}</h3>
       <div class="lib-meta">
-        <div><span>Saved</span><strong>{html.escape(saved_at)}</strong></div>
-        <div><span>Mode</span><strong>{html.escape(str(entry.get('input_mode') or '-'))}</strong></div>
-        <div><span>Tempo</span><strong>{html.escape(str(entry.get('tempo') or '-'))}</strong></div>
-        <div><span>Key</span><strong>{html.escape(str(entry.get('key') or '-'))}</strong></div>
-        <div><span>Bars</span><strong>{html.escape(str(entry.get('bars') or '-'))}</strong></div>
-        <div><span>Genre</span><strong>{html.escape(str(entry.get('genre') or '-'))}</strong></div>
+        <div><span>{html.escape(_t('lib_saved_at'))}</span><strong>{html.escape(saved_at)}</strong></div>
+        <div><span>{html.escape(_t('lib_mode'))}</span><strong>{html.escape(str(entry.get('input_mode') or '-'))}</strong></div>
+        <div><span>{html.escape(_t('label_tempo'))}</span><strong>{html.escape(str(entry.get('tempo') or '-'))}</strong></div>
+        <div><span>{html.escape(_t('label_key'))}</span><strong>{html.escape(str(entry.get('key') or '-'))}</strong></div>
+        <div><span>{html.escape(_t('label_bars'))}</span><strong>{html.escape(str(entry.get('bars') or '-'))}</strong></div>
+        <div><span>{html.escape(_t('label_genre'))}</span><strong>{html.escape(str(entry.get('genre') or '-'))}</strong></div>
       </div>
-      <p class="lib-prompt">{html.escape(text) if text else '<em>(no text prompt)</em>'}</p>
-      <p class="lib-prompt"><strong>Progression:</strong> {html.escape(progression)}</p>
+      <p class="lib-prompt">{text_block}</p>
+      <p class="lib-prompt"><strong>{html.escape(_t('lib_progression'))}:</strong> {html.escape(progression)}</p>
       <div class="lib-tags">{tags_html}</div>
-      <p class="lib-prompt"><strong>Controls:</strong> {html.escape(controls_summary)}</p>
+      <p class="lib-prompt"><strong>{html.escape(_t('lib_controls'))}:</strong> {html.escape(controls_summary)}</p>
       <div class="lib-actions">
-        <a class="btn ghost" href="/library/{quote(entry_id)}">Open</a>
+        <a class="btn ghost" href="/library/{quote(entry_id)}">{html.escape(_t('lib_open'))}</a>
         <form method="post" action="/library/continue">
           <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
-          <button type="submit">Continue from this</button>
+          <button type="submit">{html.escape(_t('lib_continue'))}</button>
         </form>
-        <form method="post" action="/library/delete" onsubmit="return confirm('Delete this saved entry? The folder under library/ will be removed.');">
+        <form method="post" action="/library/delete" onsubmit="return confirm('{_t('lib_confirm_delete')}');">
           <input type="hidden" name="entry_id" value="{html.escape(entry_id)}">
-          <button type="submit" class="btn danger">Delete</button>
+          <button type="submit" class="btn danger">{html.escape(_t('lib_delete'))}</button>
         </form>
       </div>
     </article>

@@ -11,6 +11,8 @@ It focuses on a practical file-based workflow:
 - save winning candidates to a personal library and recall them later
 - render WAV audio previews via SoundFont (optional)
 - get LLM-powered or rule-based parameter suggestions from a text prompt
+- web UI in English or Korean with a language toggle
+- configure the Gemini API key from the web Settings page
 - keep outputs easy to drag into FL Studio
 
 For Korean documentation, see [READMEKR.md](READMEKR.md).
@@ -439,10 +441,26 @@ musical realism controls so you can tweak before generating.
 
 ### Setup (LLM mode)
 
+There are two ways to provide the key:
+
+**A. From the web UI** (recommended for casual use)
+
 1. Get a free Gemini API key at <https://aistudio.google.com/app/apikey>.
-2. Set `GEMINI_API_KEY=your-key` in your shell or `.env`.
-3. Optional: override the model with `PY2FL_GEMINI_MODEL=gemini-2.0-flash-lite`.
-4. Restart the web UI.
+2. Open the web UI, click **Settings** (top right) and paste your key.
+3. Tick **Save to disk** to persist it across restarts (writes
+   `~/.py2fl/config.json` with mode 600). Leave it unchecked for
+   session-only use.
+
+**B. From the shell** (recommended for headless / CI usage)
+
+1. Set `GEMINI_API_KEY=your-key` in your shell or `.env`.
+2. Optional: override the model with `PY2FL_GEMINI_MODEL=gemini-2.0-flash-lite`.
+3. Restart the web UI.
+
+## Languages
+
+The web UI supports English (default) and Korean. Use the **EN / 한국어**
+toggle at the top of any page to switch — your choice is stored in a cookie.
 
 The result panel shows the source (`llm` or `rule`) and a one-line rationale
 so you can tell which path was taken. All API errors gracefully fall back to
