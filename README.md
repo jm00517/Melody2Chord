@@ -339,6 +339,16 @@ Metadata fields:
 - `source_start_offset_ticks`
 - `melody_aligned_to_start`
 
+### Melody offset
+
+Override the default tick-0 alignment via `--melody-offset BEATS` (CLI) or the **Melody Offset** field in the web form. Step is `0.25` beats (sixteenth-note resolution).
+
+- `0` (default) — melody downbeat lines up with bar 1.
+- Positive (e.g. `+2.0`) — melody enters that many beats after bar 1; chord/bass/drums still start at bar 1.
+- Negative (e.g. `-2.0`) — pickup before bar 1. The arrangement is extended by the necessary number of leading bars and chord/bass/drums shift forward so the music's first downbeat lands at bar `1 + pickup_bars`.
+
+When you upload a melody with a detected pickup, the web UI auto-fills the offset with a matching negative value (editable in case the detection is wrong). Metadata fields written to `meta.json`: `requested_melody_offset_beats`, `applied_melody_offset_ticks`, `pickup_bars`.
+
 ### Chord generation
 
 Melody-driven chord generation is rule-based and progression-aware.

@@ -216,6 +216,7 @@ def write_batch_meta(batch_dir: Path, request: GenerationRequest, results: list[
         "section_dynamics": request.section_dynamics,
         "modulate": request.modulate,
         "seed": request.seed,
+        "melody_offset_beats": float(request.melody_offset_beats or 0.0),
         "candidate_count": len(results),
         "selected_option": selected_option,
         "selected_output_dir": None if selected_candidate is None else str(selected_candidate.output_dir),
@@ -376,6 +377,7 @@ def _write_arrangement(
     reroll_scope: str,
 ) -> GenerationResult:
     run_dir.mkdir(parents=True, exist_ok=True)
+    offset_info = _apply_melody_offset(arrangement, request.melody_offset_beats or 0.0)
     bar_summary = _build_bar_summary(arrangement)
     full_progression_text = progression_display(parsed_progression.chord_bars) if parsed_progression else (" -> ".join(bar["chord_name"] for bar in bar_summary) if bar_summary else arrangement.progression_label)
 
@@ -437,6 +439,9 @@ def _write_arrangement(
         "section_layout": [list(item) for item in arrangement.section_layout],
         "modulation_start_bar": arrangement.modulation_start_bar,
         "modulation_semitones": arrangement.modulation_semitones,
+        "requested_melody_offset_beats": float(request.melody_offset_beats or 0.0),
+        "applied_melody_offset_ticks": offset_info["offset_ticks"],
+        "pickup_bars": offset_info["pickup_bars"],
         "files": [file.name for file in files],
         "progression_label": arrangement.progression_label,
         "progression_degrees": arrangement.progression_degrees,
@@ -457,6 +462,44 @@ def _write_arrangement(
     write_meta(meta_path, metadata)
     files.append(meta_path)
     return GenerationResult(output_dir=run_dir, files=files, metadata=metadata)
+
+
+def _apply_melody_offset(arrangement: Arrangement, offset_beats: float) -> dict[str, int]:
+    offset_ticks = int(round(offset_beats * PPQ))
+    if offset_ticks == 0:
+        return {"offset_ticks": 0, "pickup_bars": 0}
+    if offset_ticks > 0:
+        bar_end = arrangement.bars * BAR_TICKS
+        new_melody: list[NoteEvent] = []
+        for note in arrangement.melody:
+            new_start = note.start + offset_ticks
+            if new_start >= bar_end:
+                continue
+            duration = min(note.duration, bar_end - new_start)
+            if duration <= 0:
+                continue
+            new_melody.append(NoteEvent(pitch=note.pitch, start=new_start, duration=duration, velocity=note.velocity, channel=note.channel))
+        arrangement.melody = new_melody
+        return {"offset_ticks": offset_ticks, "pickup_bars": 0}
+    pickup_ticks = -offset_ticks
+    pickup_bars = (pickup_ticks + BAR_TICKS - 1) // BAR_TICKS
+    shift = pickup_bars * BAR_TICKS
+    arrangement.chords = [_shift_note(note, shift) for note in arrangement.chords]
+    arrangement.bass = [_shift_note(note, shift) for note in arrangement.bass]
+    arrangement.drums = [_shift_note(note, shift) for note in arrangement.drums]
+    melody_shift = shift + offset_ticks
+    arrangement.melody = [_shift_note(note, melody_shift) for note in arrangement.melody if note.start + melody_shift >= 0]
+    arrangement.bars += pickup_bars
+    arrangement.progression_degrees = [None] * pickup_bars + list(arrangement.progression_degrees)
+    if arrangement.section_layout:
+        arrangement.section_layout = [(start + pickup_bars, end + pickup_bars, label) for (start, end, label) in arrangement.section_layout]
+    if arrangement.modulation_start_bar is not None:
+        arrangement.modulation_start_bar += pickup_bars
+    return {"offset_ticks": offset_ticks, "pickup_bars": pickup_bars}
+
+
+def _shift_note(note: NoteEvent, ticks: int) -> NoteEvent:
+    return NoteEvent(pitch=note.pitch, start=note.start + ticks, duration=note.duration, velocity=note.velocity, channel=note.channel)
 
 
 def _build_output_dir(base_dir: Path, text: str | None, melody_path: Path | None, chord_progression: str | None) -> Path:

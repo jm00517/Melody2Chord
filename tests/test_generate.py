@@ -50,6 +50,48 @@ def test_reroll_candidate_bar_updates_candidate_meta(tmp_path: Path) -> None:
     assert after["recently_updated_bar"] == 2
     assert any(bar.get("recently_updated") for bar in after["bar_summary"])
 
+def test_melody_offset_zero_matches_default(tmp_path: Path) -> None:
+    baseline = generate_song(GenerationRequest(text="dreamy rnb", bars=4, seed=12, output_dir=tmp_path / "a"))
+    explicit = generate_song(GenerationRequest(text="dreamy rnb", bars=4, seed=12, output_dir=tmp_path / "b", melody_offset_beats=0.0))
+    assert baseline.metadata["bars"] == explicit.metadata["bars"]
+    assert baseline.metadata["applied_melody_offset_ticks"] == 0
+    assert explicit.metadata["applied_melody_offset_ticks"] == 0
+    assert baseline.metadata["pickup_bars"] == 0
+    a_melody, _ = parse_midi_notes(baseline.output_dir / "melody.mid")
+    b_melody, _ = parse_midi_notes(explicit.output_dir / "melody.mid")
+    assert [(n.pitch, n.start, n.duration) for t in a_melody for n in t.notes] == [
+        (n.pitch, n.start, n.duration) for t in b_melody for n in t.notes
+    ]
+
+
+def test_melody_offset_positive_delays_melody(tmp_path: Path) -> None:
+    result = generate_song(GenerationRequest(text="dreamy rnb", bars=4, seed=12, output_dir=tmp_path, melody_offset_beats=2.0))
+    assert result.metadata["bars"] == 4
+    assert result.metadata["applied_melody_offset_ticks"] == 960
+    assert result.metadata["pickup_bars"] == 0
+    melody_tracks, _ = parse_midi_notes(result.output_dir / "melody.mid")
+    melody_notes = [n for t in melody_tracks for n in t.notes]
+    if melody_notes:
+        assert melody_notes[0].start >= 960
+    chord_tracks, _ = parse_midi_notes(result.output_dir / "chords.mid")
+    chord_notes = [n for t in chord_tracks for n in t.notes]
+    assert chord_notes
+    assert min(n.start for n in chord_notes) == 0
+
+
+def test_melody_offset_negative_extends_with_pickup_bars(tmp_path: Path) -> None:
+    result = generate_song(GenerationRequest(text="dreamy rnb", bars=4, seed=12, output_dir=tmp_path, melody_offset_beats=-2.0))
+    assert result.metadata["pickup_bars"] == 1
+    assert result.metadata["bars"] == 5
+    assert result.metadata["applied_melody_offset_ticks"] == -960
+    chord_tracks, _ = parse_midi_notes(result.output_dir / "chords.mid")
+    chord_notes = [n for t in chord_tracks for n in t.notes]
+    assert chord_notes
+    assert min(n.start for n in chord_notes) == BAR_TICKS
+    assert result.metadata["progression_degrees"][0] is None
+    assert any(d is not None for d in result.metadata["progression_degrees"][1:])
+
+
 def test_set_candidate_bar_chord_replaces_chord_for_target_bar(tmp_path: Path) -> None:
     results = generate_candidates(GenerationRequest(text="dreamy rnb night drive", bars=4, seed=23, output_dir=tmp_path), count=2)
     batch_dir = results[0].output_dir.parent
@@ -498,6 +540,46 @@ def test_web_melody_analyze_endpoint_returns_metadata(tmp_path: Path) -> None:
     assert payload["bars"] >= 1
     assert payload["key"]
     assert payload["melody_source"]
+
+
+def test_web_melody_analyze_suggests_offset_for_pickup(tmp_path: Path) -> None:
+    melody_path = tmp_path / "pickup_melody.mid"
+    notes = [
+        NoteEvent(pitch=67, start=BAR_TICKS // 2, duration=BAR_TICKS // 4),
+        NoteEvent(pitch=69, start=BAR_TICKS, duration=BAR_TICKS // 2),
+    ]
+    write_midi(melody_path, [TrackData(name="Melody", notes=notes, channel=0)], 100)
+
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    app = Py2FLWebApp(output_dir=output_dir)
+
+    boundary = "----py2flboundary"
+    file_bytes = melody_path.read_bytes()
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="melody_midi"; filename="pickup_melody.mid"\r\n'
+        f"Content-Type: audio/midi\r\n\r\n"
+    ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    captured: dict = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    environ = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/melody/analyze",
+        "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}",
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.input": io.BytesIO(body),
+    }
+    chunks = list(app(environ, start_response))
+    assert captured["status"].startswith("200")
+    payload = json.loads(b"".join(chunks).decode("utf-8"))
+    assert payload["source_start_offset_ticks"] == BAR_TICKS // 2
+    assert payload["suggested_offset_beats"] == -2.0
 
 
 def test_humanize_off_is_a_noop(tmp_path: Path) -> None:

@@ -98,6 +98,7 @@ class GenerationRequest:
     modulate: str | None = None
     seed: int | None = None
     output_dir: Path = Path("exports")
+    melody_offset_beats: float = 0.0
 
 
 @dataclass(slots=True)

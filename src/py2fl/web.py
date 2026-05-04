@@ -41,7 +41,7 @@ from .library import (
     list_entries as library_list_entries,
     save_candidate as library_save_candidate,
 )
-from .models import GenerationRequest
+from .models import GenerationRequest, PPQ
 
 TITLE = "py2fl Studio"
 TRACK_NAMES = ("Melody", "Chords", "Bass", "Drums")
@@ -261,6 +261,7 @@ class Py2FLWebApp:
         section_dynamics = _normalize_humanize_option(form.getfirst("section_dynamics"))
         modulate = _normalize_humanize_option(form.getfirst("modulate"))
         seed = _optional_int(form.getfirst("seed"))
+        melody_offset_beats = _optional_float(form.getfirst("melody_offset_beats")) or 0.0
         count = _optional_int(form.getfirst("count")) or 4
         count = max(1, min(count, 8))
         reroll_scope = _optional_text(form.getfirst("reroll_scope")) or "all"
@@ -291,6 +292,7 @@ class Py2FLWebApp:
             modulate=modulate,
             seed=seed,
             output_dir=self.output_dir,
+            melody_offset_beats=melody_offset_beats,
         )
         candidates = generate_candidates(request, count=count, reroll_scope=reroll_scope, seed_offset=seed_offset)
         batch_dir = candidates[0].output_dir.parent if candidates else None
@@ -375,6 +377,7 @@ class Py2FLWebApp:
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
+            "melody_offset_beats": _format_offset_beats(float(batch_meta.get("melody_offset_beats") or 0.0)),
         }
         if _is_chords_batch(batch_meta):
             return self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_batch_chords(batch_meta, len(candidates)))
@@ -435,6 +438,7 @@ class Py2FLWebApp:
             "seed": _string_value(batch_meta.get("seed")),
             "count": _string_value(batch_meta.get("candidate_count")) or str(len(candidates)),
             "melody_source": _string_value(batch_meta.get("source_melody")),
+            "melody_offset_beats": _format_offset_beats(float(batch_meta.get("melody_offset_beats") or 0.0)),
         }
         if _is_chords_batch(batch_meta):
             return self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_batch_chords(batch_meta, len(candidates)))
@@ -681,6 +685,7 @@ class Py2FLWebApp:
             raise ValueError("Attach a melody MIDI file to analyze.")
 
         analysis = analyze_melody_file(melody_path)
+        suggested_offset_beats = -round((analysis.source_start_offset_ticks / PPQ) * 4) / 4 if analysis.source_start_offset_ticks else 0.0
         payload = {
             "melody_source": str(melody_path),
             "tempo": analysis.tempo_bpm,
@@ -688,6 +693,7 @@ class Py2FLWebApp:
             "bars": analysis.bars,
             "phrase_length": analysis.phrase_length,
             "source_start_offset_ticks": analysis.source_start_offset_ticks,
+            "suggested_offset_beats": suggested_offset_beats,
         }
         return self._respond_json(start_response, "200 OK", payload)
 
@@ -1183,6 +1189,7 @@ class Py2FLWebApp:
             {_select_field_html(self.t('label_harmony_spice'), "harmony_spice", state.get("harmony_spice", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             {_select_field_html(self.t('label_section_dynamics'), "section_dynamics", state.get("section_dynamics", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
             {_select_field_html(self.t('label_modulate'), "modulate", state.get("modulate", "off"), [("off", "Off"), ("low", "Low"), ("med", "Med"), ("high", "High"), ("auto", "Auto")])}
+            <label>{html.escape(self.t('label_melody_offset'))}<input type="number" name="melody_offset_beats" step="0.25" min="-16" max="16" value="{html.escape(state.get("melody_offset_beats", "0"))}" title="{html.escape(self.t('melody_offset_help'))}"></label>
             <label>{html.escape(self.t('label_seed'))}<input type="number" name="seed" placeholder="{html.escape(self.t('placeholder_optional'))}" value="{html.escape(state.get("seed", ""))}"></label>
             <label>{html.escape(self.t('label_options'))}<input type="number" name="count" min="1" max="8" value="{html.escape(state.get("count", "4"))}"></label>
           </div>
@@ -1504,6 +1511,7 @@ class Py2FLWebApp:
     const keyField = document.querySelector('input[name="key"]');
     const barsField = document.querySelector('input[name="bars"]');
     const melodySourceField = document.querySelector('input[name="melody_source"]');
+    const offsetField = document.querySelector('input[name="melody_offset_beats"]');
     let melodyInfoBanner = null;
 
     function setLockedField(field, value) {{
@@ -1554,8 +1562,14 @@ class Py2FLWebApp:
           if (data.tempo) setLockedField(tempoField, data.tempo);
           if (data.key) setLockedField(keyField, data.key);
           if (data.bars) setLockedField(barsField, data.bars);
+          if (offsetField && typeof data.suggested_offset_beats === 'number' && data.suggested_offset_beats !== 0) {{
+            offsetField.value = String(data.suggested_offset_beats);
+            offsetField.style.background = 'rgba(54, 91, 61, 0.10)';
+            offsetField.title = 'Auto-suggested from melody pickup. Edit if wrong.';
+          }}
           if (melodySourceField && data.melody_source) melodySourceField.value = data.melody_source;
-          showMelodyBanner(`Detected from melody · ${{data.tempo || '?'}} BPM · ${{data.key || '?'}} · ${{data.bars || '?'}} bars`);
+          const offsetNote = (typeof data.suggested_offset_beats === 'number' && data.suggested_offset_beats !== 0) ? ` · pickup ${{data.suggested_offset_beats}} beats` : '';
+          showMelodyBanner(`Detected from melody · ${{data.tempo || '?'}} BPM · ${{data.key || '?'}} · ${{data.bars || '?'}} bars${{offsetNote}}`);
         }} catch (err) {{
           showMelodyBanner(`Could not analyze: ${{err.message}}`);
           [tempoField, keyField, barsField].forEach(unlockField);
@@ -2403,7 +2417,17 @@ def _state_from_request(request: GenerationRequest, count: int) -> dict[str, str
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
         "melody_source": "" if request.melody_midi_path is None else str(request.melody_midi_path),
+        "melody_offset_beats": _format_offset_beats(request.melody_offset_beats or 0.0),
     }
+
+
+def _format_offset_beats(value: float) -> str:
+    if value == 0:
+        return "0"
+    rounded = round(value * 4) / 4
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:.2f}".rstrip("0").rstrip(".")
 
 
 def _state_from_chords_request(request: GenerationRequest, count: int) -> dict[str, str]:
@@ -2447,6 +2471,7 @@ def _state_from_batch_meta(batch_meta: dict[str, object], count: int) -> dict[st
         "seed": _string_value(batch_meta.get("seed")),
         "count": _string_value(batch_meta.get("candidate_count")) or str(count),
         "melody_source": _string_value(batch_meta.get("source_melody")),
+        "melody_offset_beats": _format_offset_beats(float(batch_meta.get("melody_offset_beats") or 0.0)),
     }
 
 
@@ -2542,6 +2567,18 @@ def _optional_int(value: str | None) -> int | None:
     if not value:
         return None
     return int(value)
+
+
+def _optional_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _normalize_auto_option(value: str | None) -> str | None:
