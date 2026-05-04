@@ -692,6 +692,24 @@ class Py2FLWebApp:
         if binary is None:
             raise FluidsynthMissing("fluidsynth binary not found on PATH.")
         render_candidate(candidate_dir, soundfont=sf2, fluidsynth_binary=binary, force=force)
+
+        if return_to.startswith("/library/"):
+            return self._redirect(start_response, return_to)
+
+        batch_dir = candidate_dir.parent
+        batch_meta_path = batch_dir / BATCH_META_FILENAME
+        if batch_meta_path.is_file():
+            try:
+                batch_meta = load_batch_meta(batch_dir)
+                candidates = _load_candidate_results_from_batch(batch_meta)
+                form_state = _state_from_batch_meta(batch_meta, len(candidates))
+                if _is_chords_batch(batch_meta):
+                    body = self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
+                else:
+                    body = self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
+                return self._respond_html(start_response, "200 OK", body)
+            except Exception:
+                pass
         return self._redirect(start_response, return_to)
 
     def _resolve_candidate_dir(self, path: Path) -> Path:
@@ -2218,6 +2236,28 @@ def _state_from_chords_request(request: GenerationRequest, count: int) -> dict[s
         "modulate": request.modulate or "off",
         "seed": "" if request.seed is None else str(request.seed),
         "count": str(count),
+    }
+
+
+def _state_from_batch_meta(batch_meta: dict[str, object], count: int) -> dict[str, str]:
+    return {
+        "text": _string_value(batch_meta.get("text")),
+        "tempo": _string_value(batch_meta.get("tempo")),
+        "key": _string_value(batch_meta.get("key")),
+        "genre": _string_value(batch_meta.get("genre")),
+        "bars": _string_value(batch_meta.get("bars")),
+        "chord_density": _string_value(batch_meta.get("chord_density")) or "auto",
+        "melody_density": _string_value(batch_meta.get("melody_density")) or "auto",
+        "chord_rhythm_style": _string_value(batch_meta.get("chord_rhythm_style")) or "auto",
+        "humanize": _string_value(batch_meta.get("humanize")) or "off",
+        "swing": _string_value(batch_meta.get("swing")) or "off",
+        "drum_dynamics": _string_value(batch_meta.get("drum_dynamics")) or "off",
+        "harmony_spice": _string_value(batch_meta.get("harmony_spice")) or "off",
+        "section_dynamics": _string_value(batch_meta.get("section_dynamics")) or "off",
+        "modulate": _string_value(batch_meta.get("modulate")) or "off",
+        "seed": _string_value(batch_meta.get("seed")),
+        "count": _string_value(batch_meta.get("candidate_count")) or str(count),
+        "melody_source": _string_value(batch_meta.get("source_melody")),
     }
 
 

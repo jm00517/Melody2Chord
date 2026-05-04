@@ -118,6 +118,55 @@ def test_web_preview_render_invokes_audio_module(tmp_path: Path, monkeypatch: py
     assert calls["candidate_dir"] == result.output_dir.resolve()
 
 
+def test_render_redisplays_candidate_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    from urllib.parse import urlencode
+
+    from py2fl.audio import render_candidate as real_render
+    from py2fl import audio as audio_module
+    from py2fl.generator import generate_candidates
+    from py2fl.models import GenerationRequest
+    from py2fl.web import Py2FLWebApp
+    import py2fl.web as web_module
+
+    fake_sf2 = tmp_path / "fake.sf2"
+    fake_sf2.write_bytes(b"RIFF")
+    monkeypatch.setenv("PY2FL_SOUNDFONT", str(fake_sf2))
+    monkeypatch.setattr(audio_module, "resolve_fluidsynth_binary", lambda explicit=None: "fluidsynth")
+    monkeypatch.setattr(web_module, "resolve_fluidsynth_binary", lambda explicit=None: "fluidsynth")
+
+    output_dir = tmp_path / "exports"
+    results = generate_candidates(GenerationRequest(text="dreamy rnb", bars=4, seed=21, output_dir=output_dir), count=2)
+    candidate_dir = results[0].output_dir
+
+    def fake_render(candidate_dir, soundfont=None, fluidsynth_binary=None, *, force=False, **kw):
+        (Path(candidate_dir) / "preview").mkdir(exist_ok=True)
+        (Path(candidate_dir) / "preview" / "full_arrangement.wav").write_bytes(b"WAV")
+
+    monkeypatch.setattr(web_module, "render_candidate", fake_render)
+    app = Py2FLWebApp(output_dir=output_dir)
+
+    body = urlencode({"candidate_dir": str(candidate_dir), "return_to": "/"}).encode()
+    captured: dict = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    environ = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/preview/render",
+        "CONTENT_TYPE": "application/x-www-form-urlencoded",
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.input": io.BytesIO(body),
+    }
+    chunks = list(app(environ, start_response))
+    assert captured["status"].startswith("200")
+    page = b"".join(chunks).decode("utf-8")
+    assert "candidate-detail" in page
+    assert "candidate-tab" in page
+
+
 @pytest.mark.skipif(
     resolve_fluidsynth_binary() is None or resolve_soundfont() is None,
     reason="fluidsynth + PY2FL_SOUNDFONT required for live audio render",
