@@ -67,7 +67,38 @@ class Py2FLWebApp:
         if fluidsynth_binary is not None:
             os.environ.setdefault(audio_module.ENV_FLUIDSYNTH, fluidsynth_binary)
         settings_module.apply_to_environment()
+        self._autodetect_audio_paths()
         self._current_lang = "en"
+
+    def _autodetect_audio_paths(self) -> None:
+        """Look for a SoundFont and fluidsynth binary inside the project tree.
+
+        Only fills env vars that are still empty after explicit settings and
+        config-file values are applied — user choice always wins.
+        """
+        try:
+            project_root = self.output_dir.resolve().parent
+        except OSError:
+            return
+        if not os.environ.get(audio_module.ENV_SOUNDFONT):
+            sf_dir = project_root / "soundfonts"
+            if sf_dir.is_dir():
+                for pattern in ("*.sf2", "*.sf3"):
+                    hits = sorted(sf_dir.glob(pattern))
+                    if hits:
+                        os.environ[audio_module.ENV_SOUNDFONT] = str(hits[0])
+                        break
+        if not os.environ.get(audio_module.ENV_FLUIDSYNTH) and not resolve_fluidsynth_binary():
+            tools_dir = project_root / "tools"
+            if tools_dir.is_dir():
+                for candidate in tools_dir.rglob("fluidsynth.exe"):
+                    if candidate.is_file():
+                        os.environ[audio_module.ENV_FLUIDSYNTH] = str(candidate)
+                        return
+                for candidate in tools_dir.rglob("fluidsynth"):
+                    if candidate.is_file():
+                        os.environ[audio_module.ENV_FLUIDSYNTH] = str(candidate)
+                        return
 
     def t(self, key: str) -> str:
         return translate(key, self._current_lang)

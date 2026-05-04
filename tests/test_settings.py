@@ -140,6 +140,41 @@ def test_audio_clear_removes_paths(tmp_path: Path) -> None:
     assert settings_module.load_config().get(settings_module.KEY_SOUNDFONT_PATH) is None
 
 
+def test_autodetect_picks_up_project_soundfont_and_fluidsynth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    output_dir = project / "exports"
+    output_dir.mkdir(parents=True)
+    (project / "soundfonts").mkdir()
+    fake_sf = project / "soundfonts" / "demo.sf3"
+    fake_sf.write_bytes(b"RIFF")
+    tools_subdir = project / "tools" / "fluidsynth-build" / "bin"
+    tools_subdir.mkdir(parents=True)
+    fake_bin = tools_subdir / "fluidsynth.exe"
+    fake_bin.write_bytes(b"MZ")
+
+    monkeypatch.delenv("PY2FL_SOUNDFONT", raising=False)
+    monkeypatch.delenv("PY2FL_FLUIDSYNTH", raising=False)
+
+    Py2FLWebApp(output_dir=output_dir)
+    assert os.environ.get("PY2FL_SOUNDFONT") == str(fake_sf)
+    assert os.environ.get("PY2FL_FLUIDSYNTH") == str(fake_bin)
+
+
+def test_autodetect_does_not_overwrite_explicit_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "project"
+    output_dir = project / "exports"
+    output_dir.mkdir(parents=True)
+    (project / "soundfonts").mkdir()
+    auto_sf = project / "soundfonts" / "auto.sf3"
+    auto_sf.write_bytes(b"RIFF")
+    explicit_sf = tmp_path / "explicit.sf3"
+    explicit_sf.write_bytes(b"RIFF")
+
+    monkeypatch.setenv("PY2FL_SOUNDFONT", str(explicit_sf))
+    Py2FLWebApp(output_dir=output_dir)
+    assert os.environ.get("PY2FL_SOUNDFONT") == str(explicit_sf)
+
+
 def test_save_rejects_empty_key(tmp_path: Path) -> None:
     output_dir = tmp_path / "exports"
     output_dir.mkdir()
