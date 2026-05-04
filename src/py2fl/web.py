@@ -222,6 +222,12 @@ class Py2FLWebApp:
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_settings_page(error=str(exc)))
 
+        if method == "POST" and path == "/melody/analyze":
+            try:
+                return self._handle_melody_analyze(environ, start_response)
+            except Exception as exc:
+                return self._respond_json(start_response, "400 Bad Request", {"error": str(exc)})
+
         if method == "POST" and path == "/llm/suggest-chords":
             try:
                 body = self._handle_llm_suggest(environ, chords_mode=True)
@@ -635,6 +641,35 @@ class Py2FLWebApp:
     def _redirect(self, start_response: Callable, location: str):
         start_response("303 See Other", [("Location", location), ("Content-Length", "0")])
         return [b""]
+
+    def _handle_melody_analyze(self, environ: dict, start_response: Callable):
+        from .melody import analyze_melody_file
+        from .music_theory import key_label
+
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        upload_root = self.output_dir / ".uploads"
+        upload_root.mkdir(parents=True, exist_ok=True)
+        melody_path = _resolve_melody_path(form, upload_root)
+        if melody_path is None:
+            raise ValueError("Attach a melody MIDI file to analyze.")
+
+        analysis = analyze_melody_file(melody_path)
+        payload = {
+            "melody_source": str(melody_path),
+            "tempo": analysis.tempo_bpm,
+            "key": key_label(analysis.key, analysis.mode),
+            "bars": analysis.bars,
+            "phrase_length": analysis.phrase_length,
+            "source_start_offset_ticks": analysis.source_start_offset_ticks,
+        }
+        return self._respond_json(start_response, "200 OK", payload)
+
+    @staticmethod
+    def _respond_json(start_response: Callable, status: str, body: dict):
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers = [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(payload)))]
+        start_response(status, headers)
+        return [payload]
 
     def _handle_lang_toggle(self, environ: dict, start_response: Callable):
         form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
@@ -1415,6 +1450,70 @@ class Py2FLWebApp:
     bindStopButtons(document);
     bindCandidateTabs(document);
     bindRerollForms(document);
+
+    const melodyInput = document.querySelector('input[type=file][name="melody_midi"]');
+    const tempoField = document.querySelector('input[name="tempo"]');
+    const keyField = document.querySelector('input[name="key"]');
+    const barsField = document.querySelector('input[name="bars"]');
+    const melodySourceField = document.querySelector('input[name="melody_source"]');
+    let melodyInfoBanner = null;
+
+    function setLockedField(field, value) {{
+      if (!field) return;
+      field.value = value !== null && value !== undefined ? String(value) : '';
+      field.dataset.lockedByMelody = '1';
+      field.readOnly = true;
+      field.style.background = 'rgba(54, 91, 61, 0.10)';
+      field.title = 'Detected from melody MIDI';
+    }}
+    function unlockField(field) {{
+      if (!field) return;
+      delete field.dataset.lockedByMelody;
+      field.readOnly = false;
+      field.style.background = '';
+      field.title = '';
+    }}
+    function showMelodyBanner(text) {{
+      if (!melodyInput) return;
+      if (!melodyInfoBanner) {{
+        melodyInfoBanner = document.createElement('p');
+        melodyInfoBanner.className = 'hint';
+        melodyInfoBanner.style.color = '#365b3d';
+        melodyInput.closest('label').insertAdjacentElement('afterend', melodyInfoBanner);
+      }}
+      melodyInfoBanner.textContent = text;
+    }}
+    function hideMelodyBanner() {{
+      if (melodyInfoBanner) {{ melodyInfoBanner.remove(); melodyInfoBanner = null; }}
+    }}
+
+    if (melodyInput) {{
+      melodyInput.addEventListener('change', async () => {{
+        const file = melodyInput.files?.[0];
+        if (!file) {{
+          [tempoField, keyField, barsField].forEach(unlockField);
+          if (melodySourceField) melodySourceField.value = '';
+          hideMelodyBanner();
+          return;
+        }}
+        showMelodyBanner('Analyzing melody...');
+        const fd = new FormData();
+        fd.append('melody_midi', file);
+        try {{
+          const response = await fetch('/melody/analyze', {{ method: 'POST', body: fd }});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data?.error || 'Analyze failed');
+          if (data.tempo) setLockedField(tempoField, data.tempo);
+          if (data.key) setLockedField(keyField, data.key);
+          if (data.bars) setLockedField(barsField, data.bars);
+          if (melodySourceField && data.melody_source) melodySourceField.value = data.melody_source;
+          showMelodyBanner(`Detected from melody · ${{data.tempo || '?'}} BPM · ${{data.key || '?'}} · ${{data.bars || '?'}} bars`);
+        }} catch (err) {{
+          showMelodyBanner(`Could not analyze: ${{err.message}}`);
+          [tempoField, keyField, barsField].forEach(unlockField);
+        }}
+      }});
+    }}
 
     const initialCandidate = document.querySelector('[data-candidate-tab].active')?.dataset.candidateTab;
     if (initialCandidate) {{

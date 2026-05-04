@@ -399,6 +399,50 @@ def test_web_chord_page_renders(tmp_path: Path) -> None:
     assert "1-5-6-4" in body
 
 
+def test_web_melody_analyze_endpoint_returns_metadata(tmp_path: Path) -> None:
+    melody_path = tmp_path / "input_melody.mid"
+    notes = [
+        NoteEvent(pitch=60, start=0, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=62, start=BAR_TICKS // 2, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=64, start=BAR_TICKS, duration=BAR_TICKS // 2),
+        NoteEvent(pitch=67, start=BAR_TICKS + BAR_TICKS // 2, duration=BAR_TICKS // 2),
+    ]
+    write_midi(melody_path, [TrackData(name="Melody", notes=notes, channel=0)], 100)
+
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    app = Py2FLWebApp(output_dir=output_dir)
+
+    boundary = "----py2flboundary"
+    file_bytes = melody_path.read_bytes()
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="melody_midi"; filename="input_melody.mid"\r\n'
+        f"Content-Type: audio/midi\r\n\r\n"
+    ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    captured: dict = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    environ = {
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/melody/analyze",
+        "CONTENT_TYPE": f"multipart/form-data; boundary={boundary}",
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.input": io.BytesIO(body),
+    }
+    chunks = list(app(environ, start_response))
+    assert captured["status"].startswith("200")
+    payload = json.loads(b"".join(chunks).decode("utf-8"))
+    assert payload["tempo"] == 100
+    assert payload["bars"] >= 1
+    assert payload["key"]
+    assert payload["melody_source"]
+
+
 def test_humanize_off_is_a_noop(tmp_path: Path) -> None:
     explicit = generate_song(
         GenerationRequest(text="dreamy rnb night drive", bars=4, seed=42, humanize="off", output_dir=tmp_path / "explicit")
