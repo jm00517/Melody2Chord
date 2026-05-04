@@ -31,7 +31,7 @@ from .audio import (
     resolve_soundfont,
 )
 from . import llm as llm_module
-from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta, reroll_candidate_bar, select_candidate
+from .generator import BATCH_META_FILENAME, generate_candidates, load_batch_meta, reroll_candidate_bar, select_candidate, set_candidate_bar_chord
 from .llm import is_available as llm_is_available, suggest_from_text
 from .library import (
     CONTROL_KEYS as LIBRARY_CONTROL_KEYS,
@@ -153,6 +153,13 @@ class Py2FLWebApp:
         if method == "POST" and path == "/reroll-bar":
             try:
                 body = self._handle_reroll_bar(environ)
+                return self._respond_html(start_response, "200 OK", body)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
+
+        if method == "POST" and path == "/timeline/chord":
+            try:
+                body = self._handle_set_bar_chord(environ)
                 return self._respond_html(start_response, "200 OK", body)
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_page(error=str(exc)))
@@ -372,6 +379,26 @@ class Py2FLWebApp:
         if _is_chords_batch(batch_meta):
             return self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_batch_chords(batch_meta, len(candidates)))
         return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=form_state)
+
+
+    def _handle_set_bar_chord(self, environ: dict) -> str:
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        batch_dir_value = _optional_text(form.getfirst("batch_dir"))
+        candidate_index = _optional_int(form.getfirst("candidate_index"))
+        bar_index = _optional_int(form.getfirst("bar_index"))
+        chord_token = _optional_text(form.getfirst("chord")) or ""
+        reroll_nonce = _optional_int(form.getfirst("reroll_nonce")) or 0
+        fragment = form.getfirst("fragment") == "1"
+        if not batch_dir_value or candidate_index is None or bar_index is None or not chord_token:
+            raise ValueError("batch_dir, candidate_index, bar_index, and chord are required")
+        batch_dir = self._resolve_under_output(Path(batch_dir_value))
+        batch_meta = set_candidate_bar_chord(batch_dir, candidate_index, bar_index, chord_token, reroll_nonce=reroll_nonce)
+        candidates = _load_candidate_results_from_batch(batch_meta)
+        if fragment:
+            return self._render_reroll_bar_fragment(candidates, batch_meta, candidate_index, bar_index)
+        if _is_chords_batch(batch_meta):
+            return self._render_chords_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_batch_chords(batch_meta, len(candidates)))
+        return self._render_page(candidates=candidates, batch_meta=batch_meta, form_state=_state_from_batch_meta(batch_meta, len(candidates)))
 
 
     def _handle_reroll_bar(self, environ: dict) -> str:
@@ -1088,6 +1115,9 @@ class Py2FLWebApp:
     .bar-actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
     .bar-actions form {{ display: block; }}
     .bar-action-btn {{ padding: 9px 14px; font-size: 12px; }}
+    .bar-chord-form {{ display: flex; gap: 6px; align-items: center; }}
+    .bar-chord-input {{ flex: 1; min-width: 0; padding: 7px 10px; font-size: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,0.7); }}
+    .bar-chord-btn {{ padding: 7px 12px; font-size: 12px; }}
     .match-pill {{ justify-self: start; border-radius: 999px; padding: 6px 10px; background: rgba(178,74,43,0.1); color: var(--accent-dark); font-size: 12px; font-weight: 700; }}
     .updated-pill {{ justify-self: start; border-radius: 999px; padding: 5px 10px; background: rgba(127, 47, 24, 0.18); color: #6f2412; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }}
     .inline-error {{ color: #8a2f1b; font-size: 12px; line-height: 1.4; }}
@@ -1385,7 +1415,7 @@ class Py2FLWebApp:
       }});
     }}
 
-    async function rerollBar(form) {{
+    async function postBarUpdate(form, endpoint) {{
       const barCard = form.closest('.bar-card');
       const candidateIndex = form.querySelector('[name="candidate_index"]').value;
       const barIndex = form.querySelector('[name="bar_index"]').value;
@@ -1401,10 +1431,10 @@ class Py2FLWebApp:
       barCard?.classList.add('is-busy');
       tab?.classList.add('is-busy');
       try {{
-        const response = await fetch('/reroll-bar', {{ method: 'POST', body: formData }});
+        const response = await fetch(endpoint, {{ method: 'POST', body: formData }});
         const html = await response.text();
         if (!response.ok) {{
-          throw new Error(html || `Reroll failed: ${{response.status}}`);
+          throw new Error(html || `Update failed: ${{response.status}}`);
         }}
         const doc = new DOMParser().parseFromString(html, 'text/html');
         const nextTab = doc.querySelector('[data-fragment="candidate-tab"] > *');
@@ -1435,6 +1465,14 @@ class Py2FLWebApp:
       }}
     }}
 
+    async function rerollBar(form) {{
+      await postBarUpdate(form, '/reroll-bar');
+    }}
+
+    async function setBarChord(form) {{
+      await postBarUpdate(form, '/timeline/chord');
+    }}
+
     function bindRerollForms(root = document) {{
       root.querySelectorAll('[data-reroll-bar-form]').forEach((form) => {{
         if (form.dataset.boundReroll === '1') return;
@@ -1442,6 +1480,16 @@ class Py2FLWebApp:
         form.addEventListener('submit', async (event) => {{
           event.preventDefault();
           await rerollBar(form);
+        }});
+      }});
+      root.querySelectorAll('[data-set-chord-form]').forEach((form) => {{
+        if (form.dataset.boundSetChord === '1') return;
+        form.dataset.boundSetChord = '1';
+        form.addEventListener('submit', async (event) => {{
+          event.preventDefault();
+          const input = form.querySelector('input[name="chord"]');
+          if (!input || !input.value.trim()) return;
+          await setBarChord(form);
         }});
       }});
     }}
@@ -1835,11 +1883,46 @@ class Py2FLWebApp:
       }}
     }}
 
+    async function setBarChord(form) {{
+      const candidateIndex = form.querySelector('[name="candidate_index"]').value;
+      const barIndex = form.querySelector('[name="bar_index"]').value;
+      const tab = document.getElementById(`candidate-tab-${{candidateIndex}}`);
+      const progress = document.getElementById(`candidate-progress-${{candidateIndex}}`);
+      const errorNode = form.closest('.bar-card')?.querySelector('.inline-error');
+      const formData = new FormData(form);
+      formData.set('fragment', '1');
+      try {{
+        const response = await fetch('/timeline/chord', {{ method: 'POST', body: formData }});
+        const html = await response.text();
+        if (!response.ok) throw new Error(html || `Update failed: ${{response.status}}`);
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const nextTab = doc.querySelector('[data-fragment="candidate-tab"] > *');
+        const nextProgress = doc.querySelector('[data-fragment="candidate-progress"] > *');
+        const nextBar = doc.querySelector('[data-fragment="bar-card"] > *');
+        if (nextTab && tab) {{ tab.replaceWith(nextTab); bindCandidateTabs(document); }}
+        if (nextProgress && progress) progress.replaceWith(nextProgress);
+        const currentBar = document.getElementById(`candidate-${{candidateIndex}}-bar-${{barIndex}}`);
+        if (nextBar && currentBar) {{ currentBar.replaceWith(nextBar); bindPreviewButtons(document); bindRerollForms(document); }}
+      }} catch (error) {{
+        if (errorNode) {{ errorNode.hidden = false; errorNode.textContent = error instanceof Error ? error.message : String(error); }}
+      }}
+    }}
+
     function bindRerollForms(root = document) {{
       root.querySelectorAll('[data-reroll-bar-form]').forEach((form) => {{
         if (form.dataset.boundReroll === '1') return;
         form.dataset.boundReroll = '1';
         form.addEventListener('submit', async (event) => {{ event.preventDefault(); await rerollBar(form); }});
+      }});
+      root.querySelectorAll('[data-set-chord-form]').forEach((form) => {{
+        if (form.dataset.boundSetChord === '1') return;
+        form.dataset.boundSetChord = '1';
+        form.addEventListener('submit', async (event) => {{
+          event.preventDefault();
+          const input = form.querySelector('input[name="chord"]');
+          if (!input || !input.value.trim()) return;
+          await setBarChord(form);
+        }});
       }});
     }}
 
@@ -2085,6 +2168,13 @@ def _bar_card(bar: dict[str, object], batch_dir: Path, candidate_index: int, pre
                   <button type="submit" class="secondary bar-action-btn">{html.escape(action_label)}</button>
                 </form>
               </div>
+              <form method="post" action="/timeline/chord" class="bar-chord-form" data-set-chord-form>
+                <input type="hidden" name="batch_dir" value="{html.escape(str(batch_dir))}">
+                <input type="hidden" name="candidate_index" value="{candidate_index}">
+                <input type="hidden" name="bar_index" value="{bar_index}">
+                <input type="text" name="chord" class="bar-chord-input" placeholder="Am, F, G7, Cmaj7..." autocomplete="off" spellcheck="false">
+                <button type="submit" class="ghost bar-chord-btn">Set Chord</button>
+              </form>
               <div class="inline-error" hidden></div>
             </div>
     """

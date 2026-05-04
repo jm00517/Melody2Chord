@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from py2fl.generator import BATCH_META_FILENAME, generate_candidates, generate_song, load_batch_meta, reroll_candidate_bar
+from py2fl.generator import BATCH_META_FILENAME, generate_candidates, generate_song, load_batch_meta, reroll_candidate_bar, set_candidate_bar_chord
 from py2fl.melody import analyze_melody_file
 from py2fl.midi import parse_midi_notes, write_midi
 from py2fl.models import BAR_TICKS, GenerationRequest, NoteEvent, TrackData
@@ -49,6 +49,36 @@ def test_reroll_candidate_bar_updates_candidate_meta(tmp_path: Path) -> None:
     assert after["candidate_seed"] != before["candidate_seed"]
     assert after["recently_updated_bar"] == 2
     assert any(bar.get("recently_updated") for bar in after["bar_summary"])
+
+def test_set_candidate_bar_chord_replaces_chord_for_target_bar(tmp_path: Path) -> None:
+    results = generate_candidates(GenerationRequest(text="dreamy rnb night drive", bars=4, seed=23, output_dir=tmp_path), count=2)
+    batch_dir = results[0].output_dir.parent
+    before = json.loads((results[0].output_dir / "meta.json").read_text(encoding="utf-8"))
+    before_bar2 = before["bar_summary"][1]["chord_name"]
+
+    rerolled = set_candidate_bar_chord(batch_dir, candidate_index=1, bar_index=2, chord_token="Am7")
+    after = json.loads((results[0].output_dir / "meta.json").read_text(encoding="utf-8"))
+
+    assert after["reroll_scope"] == "bar_chord_override"
+    assert after["recently_updated_bar"] == 2
+    assert "Am" in after["bar_summary"][1]["chord_name"]
+    assert after["bar_summary"][1]["chord_name"] != before_bar2 or before_bar2 == "Am"
+    assert after["bar_chord_override"]["bar_index"] == 2
+    assert after["bar_chord_override"]["chord"].startswith("A")
+    other_bars_changed = any(after["bar_summary"][i]["chord_name"] != before["bar_summary"][i]["chord_name"] for i in (0, 2, 3))
+    assert not other_bars_changed
+    assert rerolled["candidates"][0]["full_progression_text"] == after["full_progression_text"]
+
+
+def test_set_candidate_bar_chord_rejects_invalid_token(tmp_path: Path) -> None:
+    import pytest
+    results = generate_candidates(GenerationRequest(text="dreamy rnb", bars=4, seed=31, output_dir=tmp_path), count=1)
+    batch_dir = results[0].output_dir.parent
+    with pytest.raises(ValueError):
+        set_candidate_bar_chord(batch_dir, candidate_index=1, bar_index=1, chord_token="")
+    with pytest.raises(ValueError):
+        set_candidate_bar_chord(batch_dir, candidate_index=1, bar_index=99, chord_token="C")
+
 
 def test_generate_from_melody_preserves_melody(tmp_path: Path) -> None:
     melody_path = tmp_path / "melody_input.mid"
@@ -279,6 +309,33 @@ def test_web_reroll_bar_fragment_response(tmp_path: Path) -> None:
     assert 'candidate-progress-1' in body
     assert 'candidate-1-bar-2' in body
     assert 'Recently Updated' in body
+
+def test_web_set_bar_chord_fragment_response(tmp_path: Path) -> None:
+    app = Py2FLWebApp(output_dir=tmp_path)
+    results = generate_candidates(GenerationRequest(text="dreamy rnb night drive", bars=4, seed=27, output_dir=tmp_path), count=2)
+    batch_dir = results[0].output_dir.parent
+    body_bytes = f"batch_dir={batch_dir}&candidate_index=1&bar_index=3&chord=Dm7&fragment=1".encode("utf-8")
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = headers
+
+    body = b"".join(app({
+        "REQUEST_METHOD": "POST",
+        "PATH_INFO": "/timeline/chord",
+        "wsgi.input": io.BytesIO(body_bytes),
+        "CONTENT_LENGTH": str(len(body_bytes)),
+        "CONTENT_TYPE": "application/x-www-form-urlencoded",
+    }, start_response)).decode("utf-8")
+
+    assert captured["status"] == "200 OK"
+    assert 'data-fragment="bar-card"' in body
+    assert 'candidate-1-bar-3' in body
+    assert 'Recently Updated' in body
+    after = json.loads((results[0].output_dir / "meta.json").read_text(encoding="utf-8"))
+    assert "Dm" in after["bar_summary"][2]["chord_name"]
+
 
 def test_web_select_persists_batch_choice(tmp_path: Path) -> None:
     app = Py2FLWebApp(output_dir=tmp_path)
