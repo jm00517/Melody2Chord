@@ -433,8 +433,10 @@ musical realism controls so you can tweak before generating.
   `GOOGLE_API_KEY`) is set in your environment, py2fl calls
   [Google Gemini Flash](https://aistudio.google.com/app/apikey) to translate
   free-form prompts ("ethereal post-rock at golden hour") into concrete
-  parameter values. Gemini's free tier (15 req/min, 1500 req/day) is more than
-  enough for personal use.
+  parameter values. Gemini's free tier covers personal use comfortably — no
+  card required. Check your live quota at
+  [aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit);
+  Google adjusts the limits over time.
 - **Rule-based fallback**: with no key configured, py2fl uses the same
   `text_analysis.py` keyword heuristics that drive `auto` mode. The button
   still works, just with simpler logic.
