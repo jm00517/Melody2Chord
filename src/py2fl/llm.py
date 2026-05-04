@@ -13,7 +13,7 @@ from .text_analysis import analyze_text
 ENV_API_KEY = "GEMINI_API_KEY"
 ENV_API_KEY_FALLBACK = "GOOGLE_API_KEY"
 ENV_MODEL = "PY2FL_GEMINI_MODEL"
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
 API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
 CHORD_DENSITY_OPTIONS = {"1", "2", "3", "auto"}

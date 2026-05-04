@@ -454,7 +454,7 @@ There are two ways to provide the key:
 **B. From the shell** (recommended for headless / CI usage)
 
 1. Set `GEMINI_API_KEY=your-key` in your shell or `.env`.
-2. Optional: override the model with `PY2FL_GEMINI_MODEL=gemini-2.0-flash-lite`.
+2. Optional: override the model with `PY2FL_GEMINI_MODEL=gemini-2.5-flash` (default is `gemini-flash-latest` which always points at the current Flash model).
 3. Restart the web UI.
 
 ## Languages
