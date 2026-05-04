@@ -9,6 +9,8 @@ from typing import Any
 CONFIG_DIRNAME = ".py2fl"
 CONFIG_FILENAME = "config.json"
 KEY_GEMINI_API_KEY = "gemini_api_key"
+KEY_SOUNDFONT_PATH = "soundfont_path"
+KEY_FLUIDSYNTH_PATH = "fluidsynth_path"
 
 
 def config_path() -> Path:
@@ -73,11 +75,17 @@ def save_config_overwrite(data: dict[str, Any]) -> None:
 
 
 def apply_to_environment() -> None:
-    """Load the persisted config and copy known secrets into os.environ."""
+    """Load the persisted config and copy known secrets/paths into os.environ."""
     config = load_config()
     api_key = config.get(KEY_GEMINI_API_KEY)
     if isinstance(api_key, str) and api_key.strip():
         os.environ.setdefault("GEMINI_API_KEY", api_key.strip())
+    sf2 = config.get(KEY_SOUNDFONT_PATH)
+    if isinstance(sf2, str) and sf2.strip():
+        os.environ.setdefault("PY2FL_SOUNDFONT", sf2.strip())
+    fluid = config.get(KEY_FLUIDSYNTH_PATH)
+    if isinstance(fluid, str) and fluid.strip():
+        os.environ.setdefault("PY2FL_FLUIDSYNTH", fluid.strip())
 
 
 def mask_secret(value: str | None) -> str:

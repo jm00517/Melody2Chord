@@ -294,11 +294,22 @@ DAW-style sound, render WAV stems through a SoundFont using
 
 ### Setup
 
-1. Install the `fluidsynth` binary so it is on your PATH (or pass `--fluidsynth /path/to/fluidsynth`).
+1. Install the `fluidsynth` binary. On Windows the easiest options are
+   `choco install fluidsynth`, `scoop install fluidsynth`, or
+   `winget install FluidSynth.FluidSynth`. Or download a release zip from
+   <https://github.com/FluidSynth/fluidsynth/releases>, extract it, and add
+   the `bin/` folder to PATH.
 2. Download a `.sf2` SoundFont. A small free option is
-   [`TimGM6mb.sf2`](https://musescore.org/en/handbook/soundfonts-and-sfz-files-recommendations) (~5.7 MB, CC0).
-3. Either set `PY2FL_SOUNDFONT=/path/to/your.sf2` in your environment or pass
-   `--soundfont /path/to/your.sf2` when starting the server.
+   [`TimGM6mb.sf2`](https://musescore.org/sites/musescore.org/files/2018-07/TimGM6mb.sf2)
+   (~5.7 MB, CC0).
+3. Configure the path. Three options:
+   - **Web UI**: open Settings, paste the SoundFont path (and optionally a
+     fluidsynth binary override), click `Save paths`. Persists to
+     `~/.py2fl/config.json`.
+   - **Environment**: set `PY2FL_SOUNDFONT=/path/to/your.sf2` (and optionally
+     `PY2FL_FLUIDSYNTH=/path/to/fluidsynth`).
+   - **CLI**: pass `--soundfont /path/to/your.sf2 --fluidsynth /path/to/bin`
+     when starting `py2fl serve`.
 
 ### Behavior
 

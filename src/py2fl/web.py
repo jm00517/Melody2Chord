@@ -179,6 +179,18 @@ class Py2FLWebApp:
             except Exception as exc:
                 return self._respond_html(start_response, "400 Bad Request", self._render_settings_page(error=str(exc)))
 
+        if method == "POST" and path == "/settings/audio":
+            try:
+                return self._handle_settings_audio_save(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_settings_page(error=str(exc)))
+
+        if method == "POST" and path == "/settings/audio/clear":
+            try:
+                return self._handle_settings_audio_clear(environ, start_response)
+            except Exception as exc:
+                return self._respond_html(start_response, "400 Bad Request", self._render_settings_page(error=str(exc)))
+
         if method == "POST" and path == "/llm/suggest-chords":
             try:
                 body = self._handle_llm_suggest(environ, chords_mode=True)
@@ -427,9 +439,79 @@ class Py2FLWebApp:
         settings_module.clear_config_key(settings_module.KEY_GEMINI_API_KEY)
         return self._redirect(start_response, "/settings?cleared=1")
 
+    def _handle_settings_audio_save(self, environ: dict, start_response: Callable):
+        form = cgi.FieldStorage(fp=environ["wsgi.input"], environ=environ, keep_blank_values=True)
+        sf2_input = _optional_text(form.getfirst("soundfont_path")) or ""
+        fluid_input = _optional_text(form.getfirst("fluidsynth_path")) or ""
+        if not sf2_input and not fluid_input:
+            raise ValueError("Provide at least a SoundFont path.")
+        updates: dict = {}
+        if sf2_input:
+            sf2_path = Path(sf2_input).expanduser()
+            if not sf2_path.is_file():
+                raise ValueError(f"SoundFont file not found: {sf2_path}")
+            os.environ["PY2FL_SOUNDFONT"] = str(sf2_path)
+            updates[settings_module.KEY_SOUNDFONT_PATH] = str(sf2_path)
+        if fluid_input:
+            os.environ["PY2FL_FLUIDSYNTH"] = fluid_input
+            updates[settings_module.KEY_FLUIDSYNTH_PATH] = fluid_input
+        if updates:
+            settings_module.save_config(updates)
+        return self._redirect(start_response, "/settings?audio_saved=1")
+
+    def _handle_settings_audio_clear(self, environ: dict, start_response: Callable):
+        os.environ.pop("PY2FL_SOUNDFONT", None)
+        os.environ.pop("PY2FL_FLUIDSYNTH", None)
+        settings_module.clear_config_key(settings_module.KEY_SOUNDFONT_PATH)
+        settings_module.clear_config_key(settings_module.KEY_FLUIDSYNTH_PATH)
+        return self._redirect(start_response, "/settings?audio_cleared=1")
+
     def _render_settings_page(self, error: str | None = None, environ: dict | None = None) -> str:
         query = parse_qs((environ or {}).get("QUERY_STRING", ""))
         env_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        active_sf2 = self._resolved_soundfont()
+        active_fluid = self._resolved_fluidsynth()
+        persisted_sf2 = settings_module.load_config().get(settings_module.KEY_SOUNDFONT_PATH)
+        persisted_fluid = settings_module.load_config().get(settings_module.KEY_FLUIDSYNTH_PATH)
+        if active_sf2 is None:
+            audio_status = self.t("settings_audio_status_missing_sf2")
+        elif active_fluid is None:
+            audio_status = self.t("settings_audio_status_missing_binary")
+        else:
+            audio_status = self.t("settings_audio_status_ready")
+        sf2_display = str(active_sf2) if active_sf2 else self.t("settings_not_set")
+        fluid_display = active_fluid or self.t("settings_not_set")
+        audio_clear_form = ""
+        if active_sf2 or active_fluid or persisted_sf2 or persisted_fluid:
+            audio_clear_form = f"""
+            <form method="post" action="/settings/audio/clear" onsubmit="return confirm('{self.t('settings_clear_confirm')}');" style="margin-top: 10px;">
+              <button type="submit" class="btn danger">{html.escape(self.t('settings_btn_clear_paths'))}</button>
+            </form>
+            """
+        audio_section_html = f"""
+    <section class="panel">
+      <h2>{html.escape(self.t('settings_section_soundfont'))}</h2>
+      <p class="hint">{html.escape(self.t('settings_soundfont_hint'))}</p>
+      <div class="status">
+        <strong>{html.escape(self.t('settings_active_soundfont'))}:</strong> <code>{html.escape(sf2_display)}</code><br>
+        <strong>{html.escape(self.t('settings_active_fluidsynth'))}:</strong> <code>{html.escape(fluid_display)}</code><br>
+        <strong>Status:</strong> {html.escape(audio_status)}
+      </div>
+      <form method="post" action="/settings/audio" style="margin-top: 18px; display: grid; gap: 14px;">
+        <label>
+          {html.escape(self.t('settings_label_soundfont'))}
+          <input type="text" name="soundfont_path" placeholder="{html.escape(self.t('settings_soundfont_placeholder'))}" value="{html.escape(str(persisted_sf2 or ''))}">
+        </label>
+        <label>
+          {html.escape(self.t('settings_label_fluidsynth'))}
+          <input type="text" name="fluidsynth_path" placeholder="{html.escape(self.t('settings_fluidsynth_placeholder'))}" value="{html.escape(str(persisted_fluid or ''))}">
+        </label>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="submit">{html.escape(self.t('settings_btn_save_paths'))}</button>
+        </div>
+      </form>
+      {audio_clear_form}
+    </section>"""
         masked = settings_module.mask_secret(env_key) if env_key else ""
         persisted = bool(settings_module.load_config().get(settings_module.KEY_GEMINI_API_KEY))
         config_path_text = str(settings_module.config_path())
@@ -503,6 +585,7 @@ class Py2FLWebApp:
       {clear_form}
       <p class="hint" style="margin-top: 14px;">{html.escape(self.t('settings_security_note'))}</p>
     </section>
+    {audio_section_html}
   </main>
 </body>
 </html>"""
@@ -511,6 +594,10 @@ class Py2FLWebApp:
         if query.get("saved"):
             return f'<div class="saved-banner">{html.escape(self.t("settings_saved_banner"))}</div>'
         if query.get("cleared"):
+            return f'<div class="saved-banner">{html.escape(self.t("settings_cleared_banner"))}</div>'
+        if query.get("audio_saved"):
+            return f'<div class="saved-banner">{html.escape(self.t("settings_saved_banner"))}</div>'
+        if query.get("audio_cleared"):
             return f'<div class="saved-banner">{html.escape(self.t("settings_cleared_banner"))}</div>'
         return ""
 

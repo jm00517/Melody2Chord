@@ -99,6 +99,47 @@ def test_settings_page_masks_active_key(tmp_path: Path) -> None:
     assert "•" in page
 
 
+def test_audio_save_persists_soundfont_path(tmp_path: Path) -> None:
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    fake_sf2 = tmp_path / "fake.sf2"
+    fake_sf2.write_bytes(b"RIFF")
+
+    app = Py2FLWebApp(output_dir=output_dir)
+    captured = _post(app, "/settings/audio", {"soundfont_path": str(fake_sf2), "fluidsynth_path": ""})
+    assert captured["status"].startswith("303")
+    assert os.environ.get("PY2FL_SOUNDFONT") == str(fake_sf2)
+
+    config = settings_module.load_config()
+    assert config[settings_module.KEY_SOUNDFONT_PATH] == str(fake_sf2)
+
+    os.environ.pop("PY2FL_SOUNDFONT", None)
+    Py2FLWebApp(output_dir=output_dir)
+    assert os.environ.get("PY2FL_SOUNDFONT") == str(fake_sf2)
+
+
+def test_audio_save_rejects_missing_file(tmp_path: Path) -> None:
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    app = Py2FLWebApp(output_dir=output_dir)
+    captured = _post(app, "/settings/audio", {"soundfont_path": str(tmp_path / "nonexistent.sf2")})
+    assert captured["status"].startswith("400")
+
+
+def test_audio_clear_removes_paths(tmp_path: Path) -> None:
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    fake_sf2 = tmp_path / "fake.sf2"
+    fake_sf2.write_bytes(b"RIFF")
+
+    app = Py2FLWebApp(output_dir=output_dir)
+    _post(app, "/settings/audio", {"soundfont_path": str(fake_sf2)})
+    captured = _post(app, "/settings/audio/clear", {})
+    assert captured["status"].startswith("303")
+    assert os.environ.get("PY2FL_SOUNDFONT") is None
+    assert settings_module.load_config().get(settings_module.KEY_SOUNDFONT_PATH) is None
+
+
 def test_save_rejects_empty_key(tmp_path: Path) -> None:
     output_dir = tmp_path / "exports"
     output_dir.mkdir()
