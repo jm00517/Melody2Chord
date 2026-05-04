@@ -18,3 +18,8 @@ reroll_chords_check/
 tempo_check_cli/
 tempo_check_runs/
 tmp_candidate_cli/
+tools/
+soundfonts/
+tmp_pytest/
+.claude/
+library/
